@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# =========================
+# Dados e Datasets do Projeto
+# =========================
+stage1_train.zip
+stage1_train/
+stage1_test.zip
+stage1_test/
