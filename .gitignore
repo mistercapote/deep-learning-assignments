@@ -221,7 +221,4 @@ __marimo__/
 # =========================
 # Dados e Datasets do Projeto
 # =========================
-stage1_train.zip
-stage1_train/
-stage1_test.zip
-stage1_test/
+data/
