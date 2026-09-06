@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torchvision.models as models
-from torchvision.models import resnet18, ResNet18_Weights
+from torchvision.models import resnet18, ResNet18_Weights, resnet50, ResNet50_Weights
 from torch.nn import functional as F
 
 class UNetBinary(nn.Module):
@@ -77,7 +77,7 @@ class UNetDDimensional(nn.Module):
 
 
 class ASPP(nn.Module):
-    def __init__(self, in_channels, out_channels, rates=[6, 12, 18]):
+    def __init__(self, in_channels, out_channels, rates=[1, 2, 3]):
         super().__init__()
         self.conv1x1 = nn.Sequential(nn.Conv2d(in_channels, out_channels, 1), nn.ReLU())
         self.conv3x3_1 = nn.Sequential(nn.Conv2d(in_channels, out_channels, 3, padding=rates[0], dilation=rates[0]), nn.ReLU())
@@ -93,17 +93,17 @@ class ASPP(nn.Module):
 class DeepLabDDimensional(nn.Module):
     def __init__(self, D=2):
         super().__init__()
-        resnet = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+        resnet = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1, replace_stride_with_dilation=[False, False, True])
         
         # ENCODER (Mesmo do UNetDDimensional)
         self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu) 
         self.pool = resnet.maxpool 
         self.enc2 = resnet.layer1  
         self.enc3 = resnet.layer2  
-        self.enc4 = resnet.layer3  # Saída: 8x8, 256 canais
+        self.enc4 = resnet.layer3  # Saída: 8x8, 1024 canais
 
         # BOTTLENECK: Substitui as Skip Connections pelo ASPP
-        self.aspp = ASPP(in_channels=256, out_channels=128)
+        self.aspp = ASPP(in_channels=1024, out_channels=128)
         
         # DECODER: Upsampling direto (sem skip connections)
         self.up_conv = nn.Sequential(

@@ -59,7 +59,7 @@ def calculate_instance_metrics(true_instances, pred_instances):
     return mAP, count_error, num_true_objects
 
 
-def embeddings_to_instances(pred_bin, pred_emb, eps =0.5, min_samples = 10):
+def embeddings_to_instances(pred_bin, pred_emb, eps =1.0, min_samples = 5):
     mask = (torch.sigmoid(pred_bin[0])>0.5).cpu().numpy()
     pred_instances = np.zeros(mask.shape, dtype=np.int32)
     if not mask.any():
@@ -201,14 +201,14 @@ def discrimative_loss(prediction, instance, delta_d=1.5):
 def ablation(dataloader_train, dataloader_val, device, axis, seeds: list[int] = [42, 100]):
     if axis == 1:
         architectures = {
-            "SegNet": SegNetDDimensional,
-            "UNet ": UNetDDimensional,
+            # "SegNet": SegNetDDimensional,
+            # "UNet ": UNetDDimensional,
             "DeepLab": DeepLabDDimensional
         }
     elif axis == 3:
         architectures = {
             "ParseNet": ParseNetDDimensional,
-            "PSPNet": PSPNetDDimensional
+            "PSPNet": PSPNetDDimensional 
         }
 
     maP_result_comb = {}
@@ -231,6 +231,80 @@ def ablation(dataloader_train, dataloader_val, device, axis, seeds: list[int] = 
         print(f"\n[Eixo {axis}] Resultado Final: mAP = {mean_map:.4f} ± {std_map:.4f}")
     return maP_result_comb
 
-   
+def create_mosaic_real(dataset, indices=[0, 1, 2, 3]):
+    """
+    Cria uma imagem grande (mosaico 2x2) combinando 4 amostras do dataset real.
+    """
+    # Pega a primeira amostra para checar as dimensões e o formato (PyTorch [C, H, W] ou NumPy)
+    sample_img, sample_mask, sample_inst = dataset[indices[0]]
+    
+    # Converte para numpy caso estejam em tensor do PyTorch
+    if hasattr(sample_img, "detach"):
+        sample_img = sample_img.cpu().numpy()
+    if hasattr(sample_inst, "detach"):
+        sample_inst = sample_inst.cpu().numpy()
+        
+    C, H, W = sample_img.shape
+    
+    # Cria os arrays vazios para o mosaico (2x o tamanho original em H e W)
+    mosaic_img = np.zeros((C, H * 2, W * 2), dtype=sample_img.dtype)
+    mosaic_inst = np.zeros((H * 2, W * 2), dtype=np.int32)
+    
+    # Posições do grid 2x2: ( y_offset, x_offset, indice_no_dataset )
+    positions = [
+        (0, 0, indices[0]),
+        (0, W, indices[1]),
+        (H, 0, indices[2]),
+        (H, W, indices[3])
+    ]
+    
+    max_inst_id = 0
+    
+    for y_offset, x_offset, idx in positions:
+        img, _, inst = dataset[idx]
+        
+        if hasattr(img, "detach"):
+            img = img.cpu().numpy()
+        if hasattr(inst, "detach"):
+            inst = inst.cpu().numpy()
+            
+        # Insere a imagem no quadrante correspondente
+        mosaic_img[:, y_offset:y_offset+H, x_offset:x_offset+W] = img
+        
+        # Ajusta os IDs das instâncias para que não se sobreponham entre os 4 quadrantes
+        inst_shifted = inst.copy()
+        valid_mask = inst > 0
+        inst_shifted[valid_mask] += max_inst_id
+        
+        if valid_mask.any():
+            max_inst_id = inst_shifted.max()
+            
+        mosaic_inst[y_offset:y_offset+H, x_offset:x_offset+W] = inst_shifted
+        
+    return mosaic_img, mosaic_inst
 
 
+def mosaic_tile_inference_demo(mosaic_img, tile_size=128, overlap=32):
+    """
+    Simula o fatiamento de uma imagem grande em tiles com sobreposição (tiling),
+    revelando o desafio das fronteiras para objetos divididos entre os blocos.
+    """
+    _, H, W = mosaic_img.shape
+    stride = tile_size - overlap
+    
+    tiles = []
+    coordinates = []
+    
+    for y in range(0, H - overlap, stride):
+        for x in range(0, W - overlap, stride):
+            # Garante que o tile não ultrapasse as bordas da imagem grande
+            y_end = min(y + tile_size, H)
+            x_end = min(x + tile_size, W)
+            y_start = max(0, y_end - tile_size)
+            x_start = max(0, x_end - tile_size)
+            
+            tile = mosaic_img[:, y_start:y_end, x_start:x_end]
+            tiles.append(tile)
+            coordinates.append((y_start, y_end, x_start, x_end))
+            
+    return tiles, coordinates
