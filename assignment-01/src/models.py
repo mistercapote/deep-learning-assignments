@@ -242,3 +242,65 @@ class PSPNetDDimensional(nn.Module):
         d0 = self.up0(d1)
 
         return self.semantic_head(d0),  self.embed_head(d0) 
+
+
+
+class ParseModule(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.pool_global = nn.Sequential(nn.AdaptiveAvgPool2d((1)), nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=1))
+
+    def forward(self, x):
+        size = x.shape[2:]
+        x1 = self.pool_global(x)
+        x1 =  F.interpolate(x1, size=size, mode='bilinear', align_corners=False)
+        out  = torch.cat([x, x1], dim=1)
+
+        return out
+
+
+class ParseNetDDimensional(nn.Module):
+
+    def __init__(self, D=2):
+        super().__init__()
+
+
+
+        resnet = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+                
+        # ENCODER
+        self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu) # 64x64
+        self.pool = resnet.maxpool # 32x32
+        self.enc2 = resnet.layer1  # 32x32, 64 canais
+        self.enc3 = resnet.layer2  # 16x16, 128 canais
+        self.enc4 = resnet.layer3  # 8x8, 256 canais
+
+        # DECODER
+        self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.dec3 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=3, padding=1), nn.ReLU())
+        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.dec2 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
+        self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
+        self.dec1 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
+        self.up0 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+
+        self.semantic_head = nn.Conv2d(32, 1, kernel_size=1) 
+        self.embed_head = nn.Conv2d(32, D, 1) # D canais de saída
+
+        self.parse = ParseModule(in_channels=256, out_channels=256)
+        self.proj = nn.Conv2d(in_channels=512, out_channels=256, kernel_size=1)  # 
+
+    def forward(self, x):
+        x1 = self.enc1(x)
+        x2 = self.enc2(self.pool(x1))
+        x3 = self.enc3(x2)
+        x4 = self.enc4(x3)
+        # Bottleneck
+        bottleneck= self.proj(self.parse(x4))
+
+        d3 = self.dec3(torch.cat([self.up3(bottleneck), x3], dim=1)) # ideia de skipp connetions
+        d2 = self.dec2(torch.cat([self.up2(d3), x2], dim=1))
+        d1 = self.dec1(torch.cat([self.up1(d2), x1], dim=1))
+        d0 = self.up0(d1)
+
+        return self.semantic_head(d0), self.embed_head(d0)

@@ -3,7 +3,7 @@ import torch.nn as nn
 import numpy as np
 import cv2 as cv
 from sklearn.cluster import DBSCAN
-from .models import DeepLabDDimensional, SegNetDDimensional, UNetDDimensional, ASPP
+from .models import DeepLabDDimensional, SegNetDDimensional, UNetDDimensional, ParseNetDDimensional, PSPNetDDimensional
 
 def calculate_instance_metrics(true_instances, pred_instances):
     true_ids = np.unique(true_instances)[1:] # Remove the background label (0)
@@ -205,14 +205,16 @@ def ablation(dataloader_train, dataloader_val, device, axis, seeds: list[int] = 
             "UNet ": UNetDDimensional,
             "DeepLab": DeepLabDDimensional
         }
-    # elif axis == 3:
-    #     architectures = {
-    #         "ParseNet": ParseNetDDimensional,
-    #         "PSPNet": PSPNetDDimensional
-    #     }
+    elif axis == 3:
+        architectures = {
+            "ParseNet": ParseNetDDimensional,
+            "PSPNet": PSPNetDDimensional
+        }
 
-    mAP_results = []
+    maP_result_comb = {}
+   
     for name, model_class in architectures.items():
+        mAP_results = []
         for current_seed in seeds:
             print(f"Avaliando Arquitetura: {name} com seed {current_seed}")
             torch.manual_seed(current_seed)
@@ -221,12 +223,13 @@ def ablation(dataloader_train, dataloader_val, device, axis, seeds: list[int] = 
             train_model(model, dataloader_train, device, part=2, num_epochs=10)
             all_mAPs = evaluate(model, dataloader_val, device, part=2)[0]
             mAP_results.append(np.mean(all_mAPs))
-            
-    mean_map = np.mean(mAP_results)
-    std_map = np.std(mAP_results)
+        mean_map = np.mean(mAP_results)
+        std_map = np.std(mAP_results)
+        maP_result_comb[name] = (mean_map,std_map )
+    
 
-    print(f"\n[Eixo {axis}] Resultado Final: mAP = {mean_map:.4f} ± {std_map:.4f}")
-    return mean_map, std_map
+        print(f"\n[Eixo {axis}] Resultado Final: mAP = {mean_map:.4f} ± {std_map:.4f}")
+    return maP_result_comb
 
    
 
