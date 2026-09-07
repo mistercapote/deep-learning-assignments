@@ -201,8 +201,8 @@ def discrimative_loss(prediction, instance, delta_d=1.5):
 def ablation(dataloader_train, dataloader_val, device, axis, seeds: list[int] = [42, 100]):
     if axis == 1:
         architectures = {
-            # "SegNet": SegNetDDimensional,
-            # "UNet ": UNetDDimensional,
+            "SegNet": SegNetDDimensional,
+            "UNet ": UNetDDimensional,
             "DeepLab": DeepLabDDimensional
         }
     elif axis == 3:
@@ -310,7 +310,7 @@ def mosaic_tile_inference_demo(mosaic_img, tile_size=128, overlap=32):
     return tiles, coordinates
 
 
-def mosaic_inference_with_fusion(model, large_image, tile_size=128, overlap=32, device='cpu'):
+def mosaic_inference_with_fusion(model, large_image,part=1,  tile_size=128, overlap=32, device='cpu'):
     """
     Realiza inferência em mosaico (tiles) em uma imagem grande com sobreposição
     e aplica fusão de instâncias nas bordas dos tiles baseada em intersecção.
@@ -339,13 +339,21 @@ def mosaic_inference_with_fusion(model, large_image, tile_size=128, overlap=32, 
                 
             with torch.no_grad():
                 # Faz a predição local do tile
-                binary_pred = (torch.sigmoid(model(tile_tensor)) > 0.5).float().cpu().numpy()
-                pred_mask = np.squeeze(binary_pred[0, 0]).astype(np.uint8)
-                
-            # Extrai instâncias locais do tile
-        
-            _, tile_insts = cv.connectedComponents(pred_mask)
+                if part ==1:
+                    pred_bin = model(tile_tensor)
+                    binary_pred = (torch.sigmoid(model(tile_tensor)) > 0.5).float().cpu().numpy()
+                    pred_mask = np.squeeze(binary_pred[0, 0]).astype(np.uint8)
+                    
+                # Extrai instâncias locais do tile
             
+                    _, tile_insts = cv.connectedComponents(pred_mask)
+                elif part ==2:
+                    pred_bin, pred_emb = model(tile_tensor)
+                    
+                    # Decodificação da Trilha B (DBSCAN) usando a função que você criou
+                    tile_insts = embeddings_to_instances(pred_bin[0], pred_emb[0])
+                    tile_insts = np.squeeze(tile_insts) # Garante que seja 2D (H,W)
+
             # Reatribui IDs globais e resolve conflitos na sobreposição
             for l_id in np.unique(tile_insts)[1:]:
                 local_mask = (tile_insts == l_id)
