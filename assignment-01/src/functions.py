@@ -308,3 +308,107 @@ def mosaic_tile_inference_demo(mosaic_img, tile_size=128, overlap=32):
             coordinates.append((y_start, y_end, x_start, x_end))
             
     return tiles, coordinates
+
+
+def mosaic_inference_with_fusion(model, large_image, tile_size=128, overlap=32, device='cpu'):
+    """
+    Realiza inferência em mosaico (tiles) em uma imagem grande com sobreposição
+    e aplica fusão de instâncias nas bordas dos tiles baseada em intersecção.
+    """
+    # Se o modelo não for nulo, garantimos que está em modo de avaliação
+    if model is not None:
+        model.eval()
+        
+    C, H, W = large_image.shape
+    stride = tile_size - overlap
+    
+    # Canvas para acumular as predições finais
+    global_instances = np.zeros((H, W), dtype=np.int32)
+    next_instance_id = 1
+    
+    for y in range(0, H - overlap, stride):
+        for x in range(0, W - overlap, stride):
+            y_end = min(y + tile_size, H)
+            x_end = min(x + tile_size, W)
+            y_start = max(0, y_end - tile_size)
+            x_start = max(0, x_end - tile_size)
+            
+            # Recorta o tile da imagem
+            tile = large_image[:, y_start:y_end, x_start:x_end]
+            tile_tensor = torch.tensor(tile).unsqueeze(0).float().to(device)
+                
+            with torch.no_grad():
+                # Faz a predição local do tile
+                binary_pred = (torch.sigmoid(model(tile_tensor)) > 0.5).float().cpu().numpy()
+                pred_mask = np.squeeze(binary_pred[0, 0]).astype(np.uint8)
+                
+            # Extrai instâncias locais do tile
+        
+            _, tile_insts = cv.connectedComponents(pred_mask)
+            
+            # Reatribui IDs globais e resolve conflitos na sobreposição
+            for l_id in np.unique(tile_insts)[1:]:
+                local_mask = (tile_insts == l_id)
+                
+                # Olhamos para a região correspondente no canvas global
+                existing_canvas_region = global_instances[y_start:y_end, x_start:x_end]
+                
+                # Pega os IDs e a quantidade de pixels de intersecção de cada um
+                overlap_ids, counts = np.unique(existing_canvas_region[local_mask], return_counts=True)
+                
+                # Filtra o fundo (ID 0)
+                valid_mask = overlap_ids > 0
+                overlap_ids = overlap_ids[valid_mask]
+                counts = counts[valid_mask]
+
+                if len(overlap_ids) > 0:
+                    # Pega o ID global com a maior quantidade de pixels sobrepostos
+                    best_match_idx = np.argmax(counts)
+                    g_id = overlap_ids[best_match_idx]
+                    
+                    t_mask = (existing_canvas_region == g_id)
+                    
+                    intersection = counts[best_match_idx] # Já temos a área de intersecção do argmax!
+                    min_area = min(t_mask.sum(), local_mask.sum())
+                    
+                    if min_area > 0 and (intersection / min_area) > 0.5:
+                        global_instances[y_start:y_end, x_start:x_end][local_mask] = g_id
+                    else:
+                        global_instances[y_start:y_end, x_start:x_end][local_mask] = next_instance_id
+                        next_instance_id += 1
+                else:
+                    global_instances[y_start:y_end, x_start:x_end][local_mask] = next_instance_id
+                    next_instance_id += 1
+                    
+    return global_instances
+
+
+def mosaic_inference_naive(model, large_image, tile_size=128, overlap=32, device='cpu'):
+    """ Inferência ingênua (sem correção) para mostrar o erro na fronteira. """
+    if model is not None: model.eval()
+    C, H, W = large_image.shape
+    stride = tile_size - overlap
+    global_instances = np.zeros((H, W), dtype=np.int32)
+    next_instance_id = 1
+    
+    for y in range(0, H - overlap, stride):
+        for x in range(0, W - overlap, stride):
+            y_end, x_end = min(y + tile_size, H), min(x + tile_size, W)
+            y_start, x_start = max(0, y_end - tile_size), max(0, x_end - tile_size)
+            
+            tile = large_image[:, y_start:y_end, x_start:x_end]
+            tile_tensor = torch.tensor(tile).unsqueeze(0).float().to(device)
+                
+            with torch.no_grad():
+                binary_pred = (torch.sigmoid(model(tile_tensor)) > 0.5).float().cpu().numpy()
+                pred_mask = np.squeeze(binary_pred[0, 0]).astype(np.uint8)
+                
+            _, tile_insts = cv.connectedComponents(pred_mask)
+            
+            # Abordagem ingênua: Apenas sobrescreve o canvas sem verificar se o objeto já existe
+            for l_id in np.unique(tile_insts)[1:]:
+                local_mask = (tile_insts == l_id)
+                global_instances[y_start:y_end, x_start:x_end][local_mask] = next_instance_id
+                next_instance_id += 1
+                    
+    return global_instances
