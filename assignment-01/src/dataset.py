@@ -5,6 +5,7 @@ import cv2 as    cv
 from pathlib import Path
 import warnings
 
+
 def to_tensors(image: np.ndarray, instance_masks: np.ndarray):
     image_tensor = torch.from_numpy(image.transpose((2, 0, 1))).float() / 255.0
 
@@ -16,6 +17,46 @@ def to_tensors(image: np.ndarray, instance_masks: np.ndarray):
         instance_gt[mask > 0] = i + 1
         
     return image_tensor, binary_mask_tensor, instance_gt
+
+
+def generate_image(img_size: int, seed: int = None):
+    image = np.zeros((img_size, img_size, 3), dtype=np.uint8)
+    rng = np.random.default_rng(seed=seed)
+    num_ellipses = int(rng.integers(5, 21))
+    instance_masks = np.zeros((num_ellipses, img_size, img_size), dtype= np.uint8)
+    
+    for idx in range(num_ellipses):
+        center = tuple(rng.integers(0, img_size + 1, size=2).tolist())
+        axes = tuple(rng.integers(5, 41, size=2).tolist())
+        angle = int(rng.integers(0, 101))
+        gray_intensity = int(rng.integers(50, 256))
+        color = (gray_intensity, gray_intensity, gray_intensity)
+        
+        cv.ellipse(image, center, axes, angle, 0, 360, color, -1)
+        cv.ellipse(instance_masks[idx], center, axes, angle, 0, 360, 1, -1)
+        
+    contrast = rng.random() + 0.5
+    noise = rng.integers(-20, 20, size=(img_size, img_size, 3))
+    image = (image * contrast) + noise
+    image = np.clip(image, 0 , 255 ).astype(np.uint8)
+
+    return image, instance_masks
+
+
+class SyntheticEllipseDataset(Dataset):
+    def __init__(self, num_samples: int, img_size: int = 128, seed: int = None) -> None:
+        super().__init__()
+        self.num_samples = num_samples
+        self.img_size = img_size
+        self.seed = seed
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        seed = None if self.seed is None else self.seed + idx
+        image, instance_masks = generate_image(self.img_size, seed=seed)            
+        return to_tensors(image, instance_masks)
 
 
 class DSB2018Dataset(Dataset):
@@ -86,4 +127,3 @@ class DSB2018Dataset(Dataset):
             self.memory_cache[idx] = tensors
 
         return tensors
-

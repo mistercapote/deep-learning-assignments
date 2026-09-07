@@ -31,7 +31,6 @@ def plot_metrics(all_mAPs, all_count_errors, all_densities):
     plt.show()
 
 
-
 def plot_samples(samples, part: int):
     """Renderiza uma matriz comparativa de amostras aleatórias."""
     fig, axes = plt.subplots(len(samples), 3, figsize=(12, 4 * len(samples)))

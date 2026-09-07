@@ -4,6 +4,7 @@ import torchvision.models as models
 from torchvision.models import resnet18, ResNet18_Weights
 from torch.nn import functional as F
 
+
 class UNetBinary(nn.Module):
     def __init__(self) :
         super().__init__()
@@ -39,19 +40,19 @@ class UNetBinary(nn.Module):
         return self.final_conv(self.up0(d1))
 
 
-class DoubleConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-    def forward(self, x):
-        return self.conv(x)
+# class DoubleConv(nn.Module):
+#     def __init__(self, in_channels, out_channels):
+#         super().__init__()
+#         self.conv = nn.Sequential(
+#             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+#             nn.BatchNorm2d(out_channels),
+#             nn.ReLU(inplace=True),
+#             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+#             nn.BatchNorm2d(out_channels),
+#             nn.ReLU(inplace=True)
+#         )
+#     def forward(self, x):
+#         return self.conv(x)
 
 
 class UNetDDimensional(nn.Module):
@@ -68,19 +69,19 @@ class UNetDDimensional(nn.Module):
         self.enc4 = resnet.layer3  # 8x8, 256 canais
 
         # DECODER 
-        self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.dec3 = DoubleConv(256, 128)  # 128(up) + 128(skip)
-        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.dec2 = DoubleConv(128, 64)   # 64(up) + 64(skip)
-        self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
-        self.dec1 = DoubleConv(128, 64)   # 64(up) + 64(skip)
-
         # self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        # self.dec3 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=3, padding=1), nn.ReLU())
+        # self.dec3 = DoubleConv(256, 128)  # 128(up) + 128(skip)
         # self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        # self.dec2 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
+        # self.dec2 = DoubleConv(128, 64)   # 64(up) + 64(skip)
         # self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
-        # self.dec1 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
+        # self.dec1 = DoubleConv(128, 64)   # 64(up) + 64(skip)
+
+        self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.dec3 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=3, padding=1), nn.ReLU())
+        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.dec2 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
+        self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
+        self.dec1 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
 
         self.up0 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
         self.semantic_head = nn.Conv2d(32, 1, kernel_size=1) 
@@ -268,7 +269,6 @@ class PSPNetDDimensional(nn.Module):
         return self.semantic_head(d0),  self.embed_head(d0) 
 
 
-
 class ParseModule(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
@@ -279,17 +279,13 @@ class ParseModule(nn.Module):
         x1 = self.pool_global(x)
         x1 =  F.interpolate(x1, size=size, mode='bilinear', align_corners=False)
         out  = torch.cat([x, x1], dim=1)
-
+        
         return out
 
 
 class ParseNetDDimensional(nn.Module):
-
     def __init__(self, D=2):
         super().__init__()
-
-
-
         resnet = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
                 
         # ENCODER
