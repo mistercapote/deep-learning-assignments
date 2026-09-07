@@ -1,29 +1,49 @@
 import torch
 from torch.utils.data import Dataset
 import numpy as np
-import cv2 as    cv
+import cv2 as cv
 from pathlib import Path
 import warnings
+import scipy.ndimage as ndi
 
 
-def to_tensors(image: np.ndarray, instance_masks: np.ndarray):
+def to_tensors(image: np.ndarray, instance_masks: np.ndarray, part: int = 1):
     image_tensor = torch.from_numpy(image.transpose((2, 0, 1))).float() / 255.0
-
-    binary_mask = (instance_masks.sum(axis=0) > 0).astype(np.float32)
-    binary_mask_tensor = torch.from_numpy(binary_mask).unsqueeze(0)
-
-    instance_gt = np.zeros(instance_masks.shape[1:], dtype=np.int32)
-    for i, mask in enumerate(instance_masks):
-        instance_gt[mask > 0] = i + 1
+    
+    img_h, img_w = instance_masks.shape[1:]
+    instance_gt = np.zeros((img_h, img_w), dtype=np.int32)
+    
+    if part == 1:
+        binary_mask = (instance_masks.sum(axis=0) > 0).astype(np.float32)
+        target_tensor = torch.from_numpy(binary_mask).unsqueeze(0)
         
-    return image_tensor, binary_mask_tensor, instance_gt
+        for i, mask in enumerate(instance_masks):
+            instance_gt[mask > 0] = i + 1
+            
+    elif part == 2:
+        semantic_target = np.zeros((img_h, img_w), dtype=np.int64)
+        
+        for i, mask in enumerate(instance_masks):
+            if mask.sum() == 0: 
+                continue
+            
+            interior = ndi.binary_erosion(mask, iterations=2)
+            boundary = (mask > 0) & (~interior)
+            
+            semantic_target[interior > 0] = 1
+            semantic_target[boundary > 0] = 2
+            instance_gt[mask > 0] = i + 1
+            
+        target_tensor = torch.from_numpy(semantic_target).long()
+        
+    return image_tensor, target_tensor, instance_gt
 
 
 def generate_image(img_size: int, seed: int = None):
     image = np.zeros((img_size, img_size, 3), dtype=np.uint8)
     rng = np.random.default_rng(seed=seed)
     num_ellipses = int(rng.integers(5, 21))
-    instance_masks = np.zeros((num_ellipses, img_size, img_size), dtype= np.uint8)
+    instance_masks = np.zeros((num_ellipses, img_size, img_size), dtype=np.uint8)
     
     for idx in range(num_ellipses):
         center = tuple(rng.integers(0, img_size + 1, size=2).tolist())
@@ -38,17 +58,18 @@ def generate_image(img_size: int, seed: int = None):
     contrast = rng.random() + 0.5
     noise = rng.integers(-20, 20, size=(img_size, img_size, 3))
     image = (image * contrast) + noise
-    image = np.clip(image, 0 , 255 ).astype(np.uint8)
+    image = np.clip(image, 0, 255).astype(np.uint8)
 
     return image, instance_masks
 
 
 class SyntheticEllipseDataset(Dataset):
-    def __init__(self, num_samples: int, img_size: int = 128, seed: int = None) -> None:
+    def __init__(self, num_samples: int, img_size: int, part: int, seed: int = None) -> None:
         super().__init__()
         self.num_samples = num_samples
         self.img_size = img_size
         self.seed = seed
+        self.part = part
 
     def __len__(self):
         return self.num_samples
@@ -56,17 +77,11 @@ class SyntheticEllipseDataset(Dataset):
     def __getitem__(self, idx):
         seed = None if self.seed is None else self.seed + idx
         image, instance_masks = generate_image(self.img_size, seed=seed)            
-        return to_tensors(image, instance_masks)
+        return to_tensors(image, instance_masks, self.part)
 
 
 class DSB2018Dataset(Dataset):
-    """
-    Dataset otimizado para o DSB2018.
-    Aviso (Uso de RAM): Com `cache_in_memory=True`, os tensores processados são mantidos 
-    em memória RAM. O dataset DSB2018 original tem cerca de 670 imagens, o que 
-    geralmente cabe bem na memória (img_size=128). Para datasets maiores, monitore o uso.
-    """
-    def __init__(self, root_dir: str, img_size: int = 128, sample_ids: list = None,
+    def __init__(self, root_dir: str, img_size: int, part: int, sample_ids: list = None,
                  cache_in_memory: bool = True, cache_in_disk: bool = True):
         super().__init__()
         self.root_dir = Path(root_dir)
@@ -77,11 +92,11 @@ class DSB2018Dataset(Dataset):
         self.cache_in_memory = cache_in_memory
         self.cache_in_disk = cache_in_disk
         self.memory_cache = {}
+        self.part = part
 
         if self.cache_in_memory and len(self.sample_ids) > 1000:
             warnings.warn("Dataset grande (>1000 samples). O cache em memória pode esgotar a RAM.")
 
-        # Otimização 1: Resolve glob() e armazena os caminhos apenas uma vez
         self.sample_paths = []
         for sid in self.sample_ids:
             sdir = self.root_dir / sid
@@ -93,21 +108,18 @@ class DSB2018Dataset(Dataset):
         return len(self.sample_ids)
 
     def __getitem__(self, idx):
-        # Otimização 2: Busca direto do cache em memória (se disponível)
         if self.cache_in_memory and idx in self.memory_cache:
             return self.memory_cache[idx]
 
         img_path, mask_paths, sample_dir = self.sample_paths[idx]
         
-        # Otimização 3: Busca do cache em disco (evita reprocessamento entre kernels)
-        disk_cache_path = sample_dir / f"cache_{self.img_size}.pt"
+        disk_cache_path = sample_dir / f"cache_part{self.part}_{self.img_size}.pt"
         if self.cache_in_disk and disk_cache_path.exists():
             tensors = torch.load(disk_cache_path, weights_only=False)
             if self.cache_in_memory:
                 self.memory_cache[idx] = tensors
             return tensors
 
-        # Processamento original preservado
         image = cv.imread(str(img_path), cv.IMREAD_COLOR)
         image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
         image = cv.resize(image, (self.img_size, self.img_size), interpolation=cv.INTER_LINEAR)
@@ -118,9 +130,8 @@ class DSB2018Dataset(Dataset):
             mask = cv.resize(mask, (self.img_size, self.img_size), interpolation=cv.INTER_NEAREST)
             instance_masks[i] = (mask > 127).astype(np.uint8)
 
-        tensors = to_tensors(image, instance_masks)
+        tensors = to_tensors(image, instance_masks, self.part)
 
-        # Salva o resultado nos caches habilitados
         if self.cache_in_disk:
             torch.save(tensors, disk_cache_path)
         if self.cache_in_memory:

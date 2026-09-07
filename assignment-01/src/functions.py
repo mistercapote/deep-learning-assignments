@@ -2,65 +2,10 @@ import torch
 import torch.nn as nn
 import numpy as np
 import cv2 as cv
-from sklearn.cluster import DBSCAN
 from torch.utils.data import DataLoader
 from typing import Dict, List, Sequence, Tuple
-from .models import DeepLabDDimensional, SegNetDDimensional, UNetDDimensional, ParseNetDDimensional, PSPNetDDimensional
-
-
-def discriminative_loss(
-    prediction: torch.Tensor,
-    instance: torch.Tensor,
-    delta_v: float = 0.1,  # Margem de variância (puxa para o centroide até esse limite)
-    delta_d: float = 1.5,  # Margem de distância (empurra centroides diferentes)
-) -> torch.Tensor:
-    batch_size = prediction.size(0)
-    total_loss = prediction.sum() * 0.0
-
-    for b in range(batch_size):
-        pred_b = prediction[b]
-        inst_b = instance[b]
-        objects_ids = torch.unique(inst_b)[1:]
-        var_loss = 0.0
-        reg_loss = 0.0
-        dist_loss = 0.0
-        centroids = []
-
-        for obj_id in objects_ids:
-            mask = inst_b == obj_id
-            pixels = pred_b[:, mask]
-
-            avg = torch.mean(pixels, dim=1)
-            
-            # Adição do epsilon (1e-6) para evitar instabilidade (gradiente NaN em 0)
-            # Elevação ao quadrado e margem delta_v otimizam a estabilidade
-            dists_to_avg = torch.norm(pixels - avg.unsqueeze(1) + 1e-6, dim=0)
-            var = torch.mean(torch.clamp(dists_to_avg - delta_v, min=0.0) ** 2)
-            
-            var_loss += var
-            reg_loss += torch.norm(avg)
-            centroids.append(avg)
-
-        num_centroids = len(centroids)
-        if num_centroids == 0:
-            continue
-
-        if num_centroids > 1:
-            centroids_tensor = torch.stack(centroids)
-            dists = torch.cdist(centroids_tensor, centroids_tensor, p=2.0)
-            triu_idx = torch.triu_indices(num_centroids, num_centroids, offset=1)
-            pairwise_dists = dists[triu_idx[0], triu_idx[1]]
-            
-            # Uso de .mean() em vez de .sum() para evitar que dist_loss domine a loss total 
-            # quando há muitos objetos na mesma imagem
-            dist_loss = torch.mean(torch.clamp(delta_d - pairwise_dists, min=0.0) ** 2)
-
-        # var_loss e reg_loss são normalizados por instância. 
-        # dist_loss já foi normalizado corretamente pelo .mean() acima
-        loss_emb = (var_loss + reg_loss) / num_centroids + dist_loss
-        total_loss += loss_emb
-
-    return total_loss / batch_size
+from skimage.segmentation import watershed
+import scipy.ndimage as ndi
 
 
 def training(
@@ -71,11 +16,13 @@ def training(
     lr: float = 1e-4,
     num_epochs: int = 10
 ) -> dict:
-    """
-    Treina o modelo para parte 1 (binária) ou parte 2 (embeddings).
-    Suporte nativo para CUDA, Intel XPU (Arc) e CPU.
-    """
-    criterion = nn.BCEWithLogitsLoss()
+    
+    if part == 1:
+        criterion = nn.BCEWithLogitsLoss()
+    else:
+        class_weights = torch.tensor([0.1, 0.3, 0.6], dtype=torch.float32).to(device)
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     num_batches = len(dataloader)
 
@@ -83,7 +30,6 @@ def training(
     print(f"Batches por época: {num_batches}")
 
     history = {'loss': [], 'iou': [], 'dice': []}
-
     for epoch in range(num_epochs):
         model.train()
 
@@ -91,29 +37,26 @@ def training(
         total_intersection = torch.tensor(0.0, device=device)
         total_union = torch.tensor(0.0, device=device)
 
-        for images, masks, instance_gt in dataloader:
+        for images, masks, _ in dataloader:
             images = images.to(device, non_blocking=True)
             masks = masks.to(device, non_blocking=True)
-
             optimizer.zero_grad()
 
-            if part == 1:
-                prediction_bin = model(images)
-                loss = criterion(prediction_bin, masks)
-            else:
-                instance_gt = instance_gt.to(device, non_blocking=True)
-                prediction_bin, prediction_emb = model(images)
-                loss_bin = criterion(prediction_bin, masks)
-                loss_emb = discriminative_loss(prediction_emb, instance_gt)
-                loss = loss_bin + loss_emb
-
+            prediction = model(images)
+            loss = criterion(prediction, masks)
+        
             loss.backward()
             optimizer.step()
 
             with torch.no_grad():
-                binary_prediction = (prediction_bin > 0).float()
-                intersection = (binary_prediction * masks).sum()
-                union = binary_prediction.sum() + masks.sum() - intersection
+                if part == 1:
+                    pred_bin = (prediction > 0).float()
+                    intersection = (pred_bin * masks).sum()
+                    union = pred_bin.sum() + masks.sum() - intersection
+                else:
+                    pred_class = torch.argmax(prediction, dim=1)
+                    intersection = ((pred_class == 1) & (masks == 1)).float().sum()
+                    union = (pred_class == 1).float().sum() + (masks == 1).float().sum() - intersection
 
                 accumulated_loss += loss.detach()
                 total_intersection += intersection
@@ -135,25 +78,39 @@ def training(
     return history
 
 
+def semantic_to_instances(pred_logits: torch.Tensor) -> np.ndarray:
+    probs = torch.softmax(pred_logits, dim=0).cpu().numpy()
+    pred_class = np.argmax(probs, axis=0)
+    
+    interior_mask = (pred_class == 1)
+    markers, num_features = ndi.label(interior_mask)
+    
+    if num_features == 0:
+         return np.zeros_like(pred_class, dtype=np.int32)
+    
+    elevation_map = probs[2, :, :]
+    foreground_mask = (pred_class == 1) | (pred_class == 2)
+    
+    pred_instances = watershed(elevation_map, markers, mask=foreground_mask)
+    return pred_instances
+
+
 def calculate_instance_metrics(
     true_instances: np.ndarray,
     pred_instances: np.ndarray,
 ) -> Tuple[float, int, int]:
-    true_ids = np.unique(true_instances)[1:] # Remove the background label (0)
-    pred_ids = np.unique(pred_instances)[1:] # Remove the background label (0)
+    true_ids = np.unique(true_instances)[1:]
+    pred_ids = np.unique(pred_instances)[1:]
 
-    # Absolute count error
     num_true_objects = len(true_ids)
     num_pred_objects = len(pred_ids)
     count_error = abs(num_pred_objects - num_true_objects)
 
-    # Extreme cases: no objects in either true or predicted masks
     if num_true_objects == 0 and num_pred_objects == 0:
         return 1.0, count_error, num_true_objects
     if num_true_objects == 0 or num_pred_objects == 0:
         return 0.0, count_error, num_true_objects
 
-    # IoU Matrix Calculation
     iou_matrix = np.zeros((num_true_objects, num_pred_objects))
     for i, t_id in enumerate(true_ids):
         t_mask = (true_instances == t_id)
@@ -163,10 +120,9 @@ def calculate_instance_metrics(
             if intersection > 0:
                 union = np.logical_or(t_mask, p_mask).sum()
                 iou_matrix[i, j] = intersection / union
-    sorted_indices = np.argsort( iou_matrix.flatten())[::-1]
+    sorted_indices = np.argsort(iou_matrix.flatten())[::-1]
     shape = iou_matrix.shape
 
-    #  Calculate Average Precision 
     aps = []
     for t in np.arange(0.5, 1.0, 0.05):
         tp = 0
@@ -178,7 +134,7 @@ def calculate_instance_metrics(
             if iou < t:
                 break
             if t_idx not in matched_true and p_idx not in matched_pred:
-                tp += 1 # só os diferentes
+                tp += 1
                 matched_true.add(t_idx)
                 matched_pred.add(p_idx)
                 
@@ -188,28 +144,7 @@ def calculate_instance_metrics(
         aps.append(ap)
         
     mAP = np.mean(aps)
-    
     return mAP, count_error, num_true_objects
-
-
-def embeddings_to_instances(
-    pred_bin: torch.Tensor,
-    pred_emb: torch.Tensor,
-    eps: float = 0.5,
-    min_samples: int = 10,
-) -> np.ndarray:
-    mask = (torch.sigmoid(pred_bin[0]) > 0.5).cpu().numpy()
-    pred_instances = np.zeros(mask.shape, dtype=np.int32)
-    if not mask.any():
-        return pred_instances
-
-    emb_foreground = (pred_emb[:, mask].T).cpu().numpy()
-
-    model = DBSCAN(eps=eps, min_samples=min_samples)
-    labels = model.fit_predict(emb_foreground) + 1
-    pred_instances[mask] = labels
-
-    return pred_instances
 
 
 def evaluate(
@@ -217,7 +152,7 @@ def evaluate(
     dataloader: DataLoader,
     device: torch.device,
     part: int,
-    k_samples: int = 4,
+    k_samples: int = 6,
 ) -> Tuple[List[float], List[int], List[int], List[Tuple[int, np.ndarray, np.ndarray, np.ndarray]]]:
     model.eval()
     all_mAPs = []
@@ -230,7 +165,7 @@ def evaluate(
             if part == 1:
                 binary_preds = (torch.sigmoid(model(images.to(device))) > 0.5).float().cpu().numpy()
             elif part == 2:
-                binary_preds, embed_preds = model(images.to(device))
+                preds = model(images.to(device))
         real_instances_np = real_instances.numpy()
 
         for i in range(images.size(0)):
@@ -238,7 +173,7 @@ def evaluate(
                 pred_instances = np.squeeze(binary_preds[i, 0])
                 pred_instances = cv.connectedComponents(pred_instances.astype(np.uint8))[1]
             elif part == 2:
-                pred_instances = embeddings_to_instances(binary_preds[i], embed_preds[i])
+                pred_instances = semantic_to_instances(preds[i])
 
             mAP, count_error, density = calculate_instance_metrics(
                 real_instances_np[i],
@@ -257,46 +192,3 @@ def evaluate(
         samples = [samples[i] for i in index]
 
     return all_mAPs, all_count_errors, all_densities, samples
-
-
-def ablation(
-    dataloader_train: DataLoader,
-    dataloader_val: DataLoader,
-    device: torch.device,
-    axis: int,
-    seeds: Sequence[int] = (42, 100),
-) -> Dict[str, Tuple[float, float]]:
-    if axis == 1:
-        architectures = {
-            "SegNet": SegNetDDimensional,
-            "UNet ": UNetDDimensional,
-            "DeepLab": DeepLabDDimensional,
-        }
-    elif axis == 3:
-        architectures = {
-            "ParseNet": ParseNetDDimensional,
-            "PSPNet": PSPNetDDimensional,
-        }
-    else:
-        raise ValueError("axis deve ser 1 ou 3")
-
-    maP_result_comb: Dict[str, Tuple[float, float]] = {}
-
-    for name, model_class in architectures.items():
-        mAP_results: List[float] = []
-        for current_seed in seeds:
-            print(f"Avaliando Arquitetura: {name} com seed {current_seed}")
-            torch.manual_seed(current_seed)
-            np.random.seed(current_seed)
-            model = model_class(D=2).to(device)
-            training(model, dataloader_train, device, part=2, num_epochs=10)
-            all_mAPs = evaluate(model, dataloader_val, device, part=2)[0]
-            mAP_results.append(np.mean(all_mAPs))
-        mean_map = np.mean(mAP_results)
-        std_map = np.std(mAP_results)
-        maP_result_comb[name] = (mean_map, std_map)
-
-        print(f"\n[Eixo {axis}] Resultado Final: mAP = {mean_map:.4f} ± {std_map:.4f}")
-    return maP_result_comb
-
-   
