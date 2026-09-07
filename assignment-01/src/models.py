@@ -39,29 +39,53 @@ class UNetBinary(nn.Module):
         return self.final_conv(self.up0(d1))
 
 
+class DoubleConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+    def forward(self, x):
+        return self.conv(x)
+
+
 class UNetDDimensional(nn.Module):
-    def __init__(self, D=1) :
+    def __init__(self, D=16):
         super().__init__()
         resnet = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
         
-        # ENCODER
-        self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu) # 64x64
+        # ENCODER (igual ao seu)
+        self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu)  # H/2
+        self.pool = resnet.maxpool
         self.pool = resnet.maxpool # 32x32
         self.enc2 = resnet.layer1  # 32x32, 64 canais
         self.enc3 = resnet.layer2  # 16x16, 128 canais
         self.enc4 = resnet.layer3  # 8x8, 256 canais
 
-        # DECODER
+        # DECODER 
         self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.dec3 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=3, padding=1), nn.ReLU())
+        self.dec3 = DoubleConv(256, 128)  # 128(up) + 128(skip)
         self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.dec2 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
+        self.dec2 = DoubleConv(128, 64)   # 64(up) + 64(skip)
         self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
-        self.dec1 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
+        self.dec1 = DoubleConv(128, 64)   # 64(up) + 64(skip)
+
+        # self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        # self.dec3 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=3, padding=1), nn.ReLU())
+        # self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        # self.dec2 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
+        # self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
+        # self.dec1 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
+
         self.up0 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
         self.semantic_head = nn.Conv2d(32, 1, kernel_size=1) 
         self.embed_head = nn.Conv2d(32, D, 1) # D canais de saída
-
+        
     def forward(self, x):
         x1 = self.enc1(x)
         x2 = self.enc2(self.pool(x1))
