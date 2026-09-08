@@ -72,7 +72,8 @@ def compute_separation_weight_map(instance_masks, w0=10.0, sigma=5.0):
     return weight_map.astype(np.float32)
 
 
-def to_tensors(image: np.ndarray, instance_masks: np.ndarray, part: int = 1):
+
+def to_tensors(image: np.ndarray, instance_masks: np.ndarray, part: int = 1, espessura_fronteira: int = 1):
     image_tensor = torch.from_numpy(image.transpose((2, 0, 1))).float() / 255.0
     
     img_h, img_w = instance_masks.shape[1:]
@@ -91,14 +92,17 @@ def to_tensors(image: np.ndarray, instance_masks: np.ndarray, part: int = 1):
         for i, mask in enumerate(instance_masks):
             if mask.sum() == 0:
                 continue
-            interior, boundary = instance_to_interior_boundary(mask, erosion_px=2)
+            
+            # CORREÇÃO AQUI: Substituir o 2 fixo pela variável do hiperparâmetro
+            interior, boundary = instance_to_interior_boundary(mask, erosion_px=espessura_fronteira)
+            
             semantic_target[interior] = 1
             semantic_target[boundary] = 2
             instance_gt[mask > 0] = i + 1
 
         target_tensor = torch.from_numpy(semantic_target).long()
-        weight_map = compute_separation_weight_map(instance_masks)          # NOVO
-        weight_tensor = torch.from_numpy(weight_map)                        # NOVO
+        weight_map = compute_separation_weight_map(instance_masks)          
+        weight_tensor = torch.from_numpy(weight_map)                        
 
     if part == 1:
         return image_tensor, target_tensor, instance_gt
@@ -149,7 +153,8 @@ class SyntheticEllipseDataset(Dataset):
 
 class DSB2018Dataset(Dataset):
     def __init__(self, root_dir: str, img_size: int, part: int, sample_ids: list = None,
-                 cache_in_memory: bool = True, cache_in_disk: bool = True):
+                 cache_in_memory: bool = True, cache_in_disk: bool = True,
+                 espessura_fronteira: int = 1):
         super().__init__()
         self.root_dir = Path(root_dir)
         self.img_size = img_size
@@ -160,6 +165,7 @@ class DSB2018Dataset(Dataset):
         self.cache_in_disk = cache_in_disk
         self.memory_cache = {}
         self.part = part
+        self.espessura_fronteira = espessura_fronteira
 
         if self.cache_in_memory and len(self.sample_ids) > 1000:
             warnings.warn("Dataset grande (>1000 samples). O cache em memória pode esgotar a RAM.")
@@ -180,7 +186,7 @@ class DSB2018Dataset(Dataset):
 
         img_path, mask_paths, sample_dir = self.sample_paths[idx]
         
-        disk_cache_path = sample_dir / f"cache_part{self.part}_{self.img_size}.pt"
+        disk_cache_path = sample_dir / f"cache_part{self.part}_{self.img_size}_esp{self.espessura_fronteira}.pt"
         if self.cache_in_disk and disk_cache_path.exists():
             tensors = torch.load(disk_cache_path, weights_only=False)
             if self.cache_in_memory:
@@ -197,7 +203,7 @@ class DSB2018Dataset(Dataset):
             mask = cv.resize(mask, (self.img_size, self.img_size), interpolation=cv.INTER_NEAREST)
             instance_masks[i] = (mask > 127).astype(np.uint8)
 
-        tensors = to_tensors(image, instance_masks, self.part)
+        tensors = to_tensors(image, instance_masks, self.part, self.espessura_fronteira)
 
         if self.cache_in_disk:
             torch.save(tensors, disk_cache_path)
