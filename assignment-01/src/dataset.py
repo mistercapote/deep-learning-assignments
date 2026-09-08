@@ -6,6 +6,71 @@ from pathlib import Path
 import warnings
 import scipy.ndimage as ndi
 
+# def instance_to_interior_boundary(mask, interior_frac=0.5, min_interior_px=1):
+#     dist = ndi.distance_transform_edt(mask)
+#     if dist.max() <= 0:
+#         return np.zeros_like(mask, dtype=bool), mask.astype(bool)
+    
+#     thresh = max(1.0, dist.max() * interior_frac)
+#     interior = dist >= thresh
+    
+#     # fallback de segurança: garante ao menos 1 px de interior
+#     if interior.sum() < min_interior_px:
+#         y, x = np.unravel_index(np.argmax(dist), dist.shape)
+#         interior = np.zeros_like(mask, dtype=bool)
+#         interior[y, x] = True
+    
+#     boundary = mask.astype(bool) & (~interior)
+#     return interior, boundary
+
+
+def instance_to_interior_boundary(mask, erosion_px=2, min_interior_px=1):
+    mask_bool = mask.astype(bool)
+
+    if mask_bool.sum() == 0:
+        return np.zeros_like(mask, dtype=bool), mask_bool
+
+    # Erosão em N pixels fixos, em vez de fração da distância máxima.
+    # Isso deixa o interior proporcionalmente mais "gordo" em núcleos
+    # pequenos/alongados, onde dist.max() já era baixo.
+    interior = ndi.binary_erosion(mask_bool, iterations=erosion_px)
+
+    # fallback de segurança: garante ao menos 1 px de interior
+    if interior.sum() < min_interior_px:
+        dist = ndi.distance_transform_edt(mask_bool)
+        y, x = np.unravel_index(np.argmax(dist), dist.shape)
+        interior = np.zeros_like(mask, dtype=bool)
+        interior[y, x] = True
+
+    boundary = mask_bool & (~interior)
+    return interior, boundary
+
+def compute_separation_weight_map(instance_masks, w0=10.0, sigma=5.0):
+    """
+    Gera um mapa de peso por pixel que aumenta perto de fronteiras entre
+    instâncias vizinhas -- técnica do paper original do U-Net para forçar
+    o modelo a aprender a separar núcleos próximos/tocando-se.
+    """
+    n_instances = instance_masks.shape[0]
+    h, w = instance_masks.shape[1:]
+
+    if n_instances < 2:
+        return np.ones((h, w), dtype=np.float32)
+
+    # Para cada instância, distância de CADA pixel até a borda dela
+    # (fora da máscara -> distância até a instância mais próxima)
+    dist_maps = np.zeros((n_instances, h, w), dtype=np.float32)
+    for i in range(n_instances):
+        dist_maps[i] = ndi.distance_transform_edt(instance_masks[i] == 0)
+
+    # d1: distância até a instância mais próxima; d2: até a segunda mais próxima
+    sorted_dists = np.sort(dist_maps, axis=0)
+    d1 = sorted_dists[0]
+    d2 = sorted_dists[1]
+
+    weight_map = 1.0 + w0 * np.exp(-((d1 + d2) ** 2) / (2 * sigma ** 2))
+    return weight_map.astype(np.float32)
+
 
 def to_tensors(image: np.ndarray, instance_masks: np.ndarray, part: int = 1):
     image_tensor = torch.from_numpy(image.transpose((2, 0, 1))).float() / 255.0
@@ -22,21 +87,23 @@ def to_tensors(image: np.ndarray, instance_masks: np.ndarray, part: int = 1):
             
     elif part == 2:
         semantic_target = np.zeros((img_h, img_w), dtype=np.int64)
-        
+
         for i, mask in enumerate(instance_masks):
-            if mask.sum() == 0: 
+            if mask.sum() == 0:
                 continue
-            
-            interior = ndi.binary_erosion(mask, iterations=2)
-            boundary = (mask > 0) & (~interior)
-            
-            semantic_target[interior > 0] = 1
-            semantic_target[boundary > 0] = 2
+            interior, boundary = instance_to_interior_boundary(mask, erosion_px=2)
+            semantic_target[interior] = 1
+            semantic_target[boundary] = 2
             instance_gt[mask > 0] = i + 1
-            
+
         target_tensor = torch.from_numpy(semantic_target).long()
-        
-    return image_tensor, target_tensor, instance_gt
+        weight_map = compute_separation_weight_map(instance_masks)          # NOVO
+        weight_tensor = torch.from_numpy(weight_map)                        # NOVO
+
+    if part == 1:
+        return image_tensor, target_tensor, instance_gt
+    else:
+        return image_tensor, target_tensor, instance_gt, weight_tensor
 
 
 def generate_image(img_size: int, seed: int = None):
