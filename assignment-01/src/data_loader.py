@@ -3,8 +3,11 @@ from torch.utils.data import Dataset
 import numpy as np
 import cv2 as cv
 from pathlib import Path
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+import cv2
 
-
+from scipy import ndimage
 def generate_image(img_size: int, seed: int = None):
     image = np.zeros((img_size, img_size, 3), dtype=np.uint8)
     rng = np.random.default_rng(seed=seed)
@@ -93,3 +96,134 @@ def build_dataset(dataset_type: str, **kwargs):
         return SyntheticEllipseDataset(**kwargs)
     elif dataset_type == "real":
         return DSB2018Dataset(**kwargs)
+
+def collate_fn_ternary(batch):
+    images = torch.stack([b[0] for b in batch])
+    labels = torch.stack([b[1] for b in batch])
+    dists = torch.stack([b[2] for b in batch])
+    instance_masks = [b[3] for b in batch]
+    ids = [b[4] for b in batch]
+    return images, labels, dists, instance_masks, ids
+
+
+
+
+IMG_SIZE = 128
+BOUNDARY_THICKNESS = 2  
+
+
+def generate_ternary_and_distance(instance_masks, H, W, boundary_thickness=BOUNDARY_THICKNESS):
+    """
+    Gera, a partir da lista de máscaras binárias de instância (resolução
+    original, ANTES do resize):
+      - label   (H,W) int64  : 0=fundo, 1=interior, 2=fronteira
+      - dist_map(H,W) float32: distância normalizada [0,1] ao fundo
+
+    COMO A FRONTEIRA É GERADA:
+      Para cada instância i, erodemos a máscara m_i com elemento estruturante
+      de conectividade-8, `boundary_thickness` iterações. O anel de pixels
+      removidos pela erosão (m_i AND NOT erode(m_i)) é a fronteira daquela
+      instância. A classe "fronteira" global é a UNIÃO desses anéis de todas
+      as instâncias, e tem PRIORIDADE sobre "interior": se um pixel cai em
+      fronteira de uma instância e interior de outra (instâncias coladas),
+      ele fica marcado como fronteira — que é justamente o pixel ambíguo que
+      queremos que o modelo aprenda a reconhecer como "corte" entre núcleos.
+
+    ESPESSURA (boundary_thickness=2 px, padrão):
+      - Fina demais (1px): depois que a CNN suaviza a predição, o gap de 1px
+        some facilmente e o watershed volta a fundir instâncias vizinhas.
+      - Grossa demais (4-5px): em núcleos pequenos (diâmetro ~8-10px) a
+        erosão come quase todo o interior, deixando poucos pixels de
+        marcador confiável para o watershed, e a classe interior fica
+        pequena/ruidosa demais para treinar bem.
+      - 2px é o meio-termo padrão adotado em trabalhos de segmentação de
+        núcleos/células com watershed marcado.
+
+    MAPA DE DISTÂNCIA:
+      Para cada instância, calculamos a distância euclidiana ao fundo
+      (scipy.ndimage.distance_transform_edt) e normalizamos pelo máximo
+      DENTRO daquela própria instância. Isso é importante: sem essa
+      normalização por instância, núcleos grandes dominariam a loss (teriam
+      valores de distância muito maiores que núcleos pequenos); normalizando
+      cada um pelo seu próprio pico, todo núcleo contribui numa escala
+      [0,1] comparável, do centro (valor 1) até a borda (valor ~0).
+    """
+    label = np.zeros((H, W), dtype=np.int64)
+    dist_map = np.zeros((H, W), dtype=np.float32)
+    struct = ndimage.generate_binary_structure(2, 2)
+
+    interiors, boundaries = [], []
+    for m in instance_masks:
+        m_bool = m.astype(bool)
+        if m_bool.sum() == 0:
+            continue
+        eroded = ndimage.binary_erosion(m_bool, structure=struct,
+                                         iterations=boundary_thickness)
+        ring = m_bool & ~eroded
+        interiors.append(eroded)
+        boundaries.append(ring)
+
+        dt = ndimage.distance_transform_edt(m_bool)
+        max_dt = dt.max()
+        if max_dt > 0:
+            dist_map = np.maximum(dist_map, dt / max_dt)
+
+    for interior in interiors:
+        label[interior] = 1
+    for ring in boundaries:            # fronteira sobrescreve (prioridade máxima)
+        label[ring] = 2
+
+    return label, dist_map
+class DSB2018TernaryDataset(Dataset):
+    def __init__(self, root, img_size=IMG_SIZE, boundary_thickness=BOUNDARY_THICKNESS,
+                 augment=None):
+        self.root = Path(root)
+        self.ids = sorted([p.name for p in self.root.iterdir() if p.is_dir()])
+        self.img_size = img_size
+        self.boundary_thickness = boundary_thickness
+        self.augment = augment
+
+    def __len__(self):
+        return len(self.ids)
+
+    def _load_instance_masks(self, mask_dir):
+        mask_files = sorted(mask_dir.glob('*.png'))
+        return [(np.array(Image.open(mf).convert('L')) > 0).astype(np.uint8)
+                for mf in mask_files]
+
+    def __getitem__(self, idx):
+        img_id = self.ids[idx]
+        img_path = self.root / img_id / 'images' / f'{img_id}.png'
+        mask_dir = self.root / img_id / 'masks'
+
+        image = np.array(Image.open(img_path).convert('RGB'))
+        instance_masks = self._load_instance_masks(mask_dir)
+        H, W = image.shape[:2]
+
+        # gera rótulo ternário e mapa de distância NA RESOLUÇÃO ORIGINAL,
+        # antes de redimensionar — assim a erosão/distância não é afetada
+        # por artefatos de interpolação do resize
+        label, dist_map = generate_ternary_and_distance(
+            instance_masks, H, W, self.boundary_thickness)
+
+        image_r = cv2.resize(image, (self.img_size, self.img_size),
+                              interpolation=cv2.INTER_LINEAR)
+        label_r = cv2.resize(label.astype(np.uint8), (self.img_size, self.img_size),
+                              interpolation=cv2.INTER_NEAREST).astype(np.int64)
+        dist_r = cv2.resize(dist_map, (self.img_size, self.img_size),
+                             interpolation=cv2.INTER_LINEAR)
+
+        if self.augment is not None:
+            aug = self.augment(image=image_r, masks=[label_r, dist_r])
+            image_r, (label_r, dist_r) = aug['image'], aug['masks']
+
+        image_t = torch.from_numpy(image_r / 255.0).permute(2, 0, 1).float()
+        label_t = torch.from_numpy(label_r).long()                       # (H,W)
+        dist_t = torch.from_numpy(dist_r.astype(np.float32)).unsqueeze(0)  # (1,H,W)
+
+        instance_masks_r = [
+            cv2.resize(m, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
+            for m in instance_masks
+        ]
+
+        return image_t, label_t, dist_t, instance_masks_r, img_id

@@ -3,8 +3,7 @@ import torch.nn as nn
 import numpy as np
 import cv2 as cv
 from sklearn.cluster import DBSCAN
-from .models import DeepLabDDimensional, SegNetDDimensional, UNetDDimensional, ParseNetDDimensional, PSPNetDDimensional
-
+from .models import   ParseNetDDimensional, PSPNetDDimensional, UNetTernary
 def calculate_instance_metrics(true_instances, pred_instances):
     true_ids = np.unique(true_instances)[1:] # Remove the background label (0)
     pred_ids = np.unique(pred_instances)[1:] # Remove the background label (0)
@@ -199,16 +198,10 @@ def discrimative_loss(prediction, instance, delta_d=1.5):
 
 
 def ablation(dataloader_train, dataloader_val, device, axis, seeds: list[int] = [42, 100]):
-    if axis == 1:
-        architectures = {
-            "SegNet": SegNetDDimensional,
-            "UNet ": UNetDDimensional,
-            "DeepLab": DeepLabDDimensional
-        }
-    elif axis == 3:
-        architectures = {
-            "ParseNet": ParseNetDDimensional,
-            "PSPNet": PSPNetDDimensional 
+    
+    architectures = {
+         
+                  "UNeT": UNetTernary
         }
 
     maP_result_comb = {}
@@ -219,7 +212,7 @@ def ablation(dataloader_train, dataloader_val, device, axis, seeds: list[int] = 
             print(f"Avaliando Arquitetura: {name} com seed {current_seed}")
             torch.manual_seed(current_seed)
             np.random.seed(current_seed)
-            model = model_class(D=2).to(device)
+            model = model_class().to(device)
             train_model(model, dataloader_train, device, part=2, num_epochs=10)
             all_mAPs = evaluate(model, dataloader_val, device, part=2)[0]
             mAP_results.append(np.mean(all_mAPs))
