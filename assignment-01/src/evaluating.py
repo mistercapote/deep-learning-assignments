@@ -140,10 +140,10 @@ def evaluate_instances_binary(model, loader, prob_threshold=0.5, min_size=5, k_s
 # ==============================================================================
 def decode_watershed(
 		class_probs,
-		dist_map=None,
-		interior_thresh=0.4,
-		fg_thresh=0.5,
-		min_marker_size=5,
+		dist_map,
+		interior_thresh,
+        fg_thresh,
+        min_marker_size
 ):
 	"""Decodificação por Watershed Marcado:
 
@@ -184,13 +184,18 @@ def decode_watershed(
 	return pred_masks
 
 
+
+
+
+
+
 @torch.no_grad()
 def evaluate_instances_ternary(
 		model,
 		loader,
-		interior_thresh=0.55,
+		interior_thresh=0.3,
 		fg_thresh=0.5,
-		min_marker_size=5,
+		min_marker_size=2,
 		k_samples=6,
 		csv_path=None
 ):
@@ -206,19 +211,25 @@ def evaluate_instances_ternary(
 	samples = []
 	records = []
 
-	for images, _, _, instance_masks_batch, ids in loader:
+	for images, labels, _, instance_masks_batch, ids in loader:
 		images = images.to(DEVICE)
 		logits_cls, dist_pred = model(images)
 		probs_batch = F.softmax(logits_cls, dim=1).cpu().numpy()
 		dists_batch = dist_pred.squeeze(1).cpu().numpy()
+		pred_ternary_batch = np.argmax(probs_batch, axis=1)
+		labels_np = (
+            labels.numpy()
+            if hasattr(labels, 'numpy')
+            else labels.cpu().numpy()
+        )
 
 		for b in range(images.size(0)):
 			pred_masks = decode_watershed(
 					probs_batch[b],
 					dists_batch[b],
-					interior_thresh=interior_thresh,
-					fg_thresh=fg_thresh,
-					min_marker_size=min_marker_size,
+					interior_thresh,
+					fg_thresh,
+					min_marker_size,
 			)
 			gt_masks = instance_masks_batch[b]
 			n_pred, n_gt = len(pred_masks), len(gt_masks)
@@ -228,8 +239,11 @@ def evaluate_instances_ternary(
 			densities.append(n_gt)
 
 			img_np = images[b].cpu().numpy().transpose(1, 2, 0)
-			samples.append((count_err, img_np, gt_masks, pred_masks))
 
+			gt_t = labels_np[b]
+			pred_t = pred_ternary_batch[b]
+	
+			samples.append((count_err, img_np, gt_t, pred_t, gt_masks, pred_masks))
 			if n_pred == 0 and n_gt == 0:
 				per_image_aps.append(1.0)
 				records.append({
@@ -302,5 +316,5 @@ def evaluate_instances_ternary(
 		pd.DataFrame(records).to_csv(csv_path, index=False)
 	aps = np.where(denom_total > 0, tp_total / denom_total, 1.0)
 	samples.sort(key=lambda s: -s[0])
-	return aps, count_errors, densities, per_image_aps, samples[:k_samples]
+	return aps, count_errors, densities, per_image_aps, samples[:k_samples] + samples[-k_samples:]
 

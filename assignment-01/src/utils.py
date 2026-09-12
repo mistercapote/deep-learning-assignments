@@ -211,14 +211,12 @@ def plot_training_curves_ternary(history):
 	axes[0].set_title('Evolução da Loss Combinada')
 	axes[0].set_xlabel('Época')
 	axes[0].set_ylabel('Loss')
-	axes[0].grid(alpha=0.3)
 	axes[0].legend()
 
 	axes[1].plot(history['val_cls_loss'], label='Val Classif. (Focal)')
 	axes[1].plot(history['val_dist_loss'], label='Val Distância (L1)')
 	axes[1].set_title('Componentes da Loss de Validação')
 	axes[1].set_xlabel('Época')
-	axes[1].grid(alpha=0.3)
 	axes[1].legend()
 
 	plt.tight_layout()
@@ -226,80 +224,274 @@ def plot_training_curves_ternary(history):
 
 
 
-# def plot_metrics(all_mAPs, all_count_errors, all_densities):
-#     fig, ax = plt.subplots(1, 2, figsize=(10, 6))
+# def plot_samples(samples):
+#     """Layout: uma coluna por amostra, 5 linhas:
 
-#     color = 'tab:blue'
-#     ax[0].set_xlabel('Densidade de Objetos (Qtd. de Instâncias Reais)')
-#     ax[0].set_ylabel('mAP (Threshold 0.5 a 0.95)', color=color)
-#     ax[0].scatter(all_densities, all_mAPs, color=color, alpha=0.6, label='mAP')
-#     ax[0].tick_params(axis='y', labelcolor=color)
-#     ax[0].spines['right'].set_visible(False)
-#     ax[0].spines['top'].set_visible(False)
-#     ax[0].set_title("Quantificação de Falhas: Desempenho vs. Densidade", fontsize=10, fontweight='bold')
+#     1. Imagem original
+#     2. Gabarito com fronteira (3 cores: fundo, interior, fronteira)
+#     3. Predição com fronteira (3 cores: CNN argmax)
+#     4. Gabarito de instâncias (múltiplas cores, fundo preto)
+#     5. Predição de instâncias (múltiplas cores, fundo preto)
 
-#     color = 'tab:red'
-#     ax[1].set_ylabel('Erro Absoluto de Contagem', color=color)
-#     ax[1].scatter(all_densities, all_count_errors, color=color, alpha=0.6, label='Erro de Contagem')
-#     ax[1].set_xlabel('Densidade de Objetos (Qtd. de Instâncias Reais)')
-#     ax[1].tick_params(axis='y', labelcolor=color)
-#     ax[1].spines['right'].set_visible(False)
-#     ax[1].spines['top'].set_visible(False)
-#     ax[1].set_title("Quantificação de Falhas: Desempenho vs. Densidade", fontsize=10, fontweight='bold')
-#     plt.grid(False)
-#     fig.tight_layout()
-#     plt.show()
-
-
-# def masks_to_label(masks, shape):
-#     """
-#     Converte uma LISTA de máscaras binárias (formato usado por
-#     evaluate_instances/greedy_match) num único MAPA DE RÓTULOS (H,W),
-#     formato que cmap='nipy_spectral' espera pra colorir por instância:
-#     0 = fundo, 1 = instância 1, 2 = instância 2, ...
- 
-#     Se duas máscaras se sobrepuserem (não deveria acontecer com
-#     componentes conexos, mas por segurança), a última da lista "ganha"
-#     o pixel disputado.
-#     """
-#     label = np.zeros(shape, dtype=np.int32)
-#     for i, m in enumerate(masks, start=1):
-#         label[m.astype(bool)] = i
-#     return label
-
-    
-# def plot_samples(samples, part: int = 1):
-#     """
-#     Layout: uma coluna por amostra, 3 linhas (original / gabarito / predição),
-#     cada instância com uma cor distinta via nipy_spectral (fundo forçado a
-#     preto com máscara, pra não ficar colorido também).
+#     Espera tuplas no formato: (count_err, img_np, gt_t, pred_t, gt_masks,
+#     pred_masks)
 #     """
 #     n_samples = len(samples)
-#     fig, axes = plt.subplots(3, n_samples, figsize=(4 * n_samples, 12), squeeze=False)
-#     fig.suptitle(f"Amostra de {n_samples} Resultados - Parte {part}", fontsize=14, fontweight='bold')
- 
-#     cmap = plt.get_cmap('prism').copy()
-#     cmap.set_bad('black')  # fundo (rótulo 0, mascarado) sempre preto
- 
-#     for idx, (err, img, gt_masks, pred_masks) in enumerate(samples):
+#     fig, axes = plt.subplots(
+#         5, n_samples, figsize=(4 * n_samples, 20), squeeze=False
+#     )
+#     fig.suptitle(
+#         f'Os {n_samples} piores resultados', fontsize=14, fontweight='bold'
+#     )
+
+#     # 3 cores para mapas ternários (0: fundo, 1: interior, 2: fronteira)
+#     cmap_ternary = ListedColormap(['#1a1a1a', '#2b83ba', '#d7191c'])
+
+#     # Paleta de instâncias (rótulo 0 mascarado em preto)
+#     cmap_inst = plt.get_cmap('prism').copy()
+#     cmap_inst.set_bad('black')
+
+#     for idx, (
+#         err,
+#         img,
+#         gt_ternary,
+#         pred_ternary,
+#         gt_masks,
+#         pred_masks,
+#     ) in enumerate(samples):
 #         H, W = img.shape[:2]
-#         gt_label = masks_to_label(gt_masks, (H, W))
-#         pred_label = masks_to_label(pred_masks, (H, W))
- 
+
+#         # Conversão das instâncias para mapas de rótulos com fundo 0 mascarado
+#         gt_label = (
+#             masks_to_label(gt_masks, (H, W))
+#             if not (isinstance(gt_masks, np.ndarray) and gt_masks.ndim == 2)
+#             else gt_masks
+#         )
+#         pred_label = (
+#             masks_to_label(pred_masks, (H, W))
+#             if not (isinstance(pred_masks, np.ndarray) and pred_masks.ndim == 2)
+#             else pred_masks
+#         )
+
 #         gt_masked = np.ma.masked_where(gt_label == 0, gt_label)
 #         pred_masked = np.ma.masked_where(pred_label == 0, pred_label)
 
-#         axes[0, idx].imshow(img)
-#         axes[0, idx].set_title("Original")
+#         # Linha 1: Imagem Original
+#         img_to_show = np.clip(img, 0, 1) if img.max() <= 1.0 else img
+#         axes[0, idx].imshow(img_to_show)
+#         axes[0, idx].set_title('Original')
 #         axes[0, idx].axis('off')
 
-#         axes[1, idx].imshow(gt_masked, cmap=cmap, interpolation='nearest')
-#         axes[1, idx].set_title(f"Gabarito (Instâncias: {len(gt_masks)})")
+#         # Linha 2: Gabarito com fronteira (3 cores)
+#         axes[1, idx].imshow(
+#             gt_ternary, cmap=cmap_ternary, vmin=0, vmax=2, interpolation='nearest'
+#         )
+#         axes[1, idx].set_title('Gabarito (Fronteira)')
 #         axes[1, idx].axis('off')
- 
-#         axes[2, idx].imshow(pred_masked, cmap=cmap, interpolation='nearest')
-#         axes[2, idx].set_title(f"Predição (Instâncias: {len(pred_masks)}) | Erro: {err}")
+
+#         # Linha 3: Predição com fronteira (3 cores)
+#         axes[2, idx].imshow(
+#             pred_ternary,
+#             cmap=cmap_ternary,
+#             vmin=0,
+#             vmax=2,
+#             interpolation='nearest',
+#         )
+#         axes[2, idx].set_title('Predição (Fronteira)')
 #         axes[2, idx].axis('off')
- 
-#     plt.tight_layout()
+
+#         # Linha 4: Gabarito colorido por instâncias
+#         n_gt = (
+#             len(gt_masks)
+#             if isinstance(gt_masks, list)
+#             else len(np.unique(gt_label[gt_label > 0]))
+#         )
+#         axes[3, idx].imshow(gt_masked, cmap=cmap_inst, interpolation='nearest')
+#         axes[3, idx].set_title(f'Gabarito (Instâncias: {n_gt})')
+#         axes[3, idx].axis('off')
+
+#         # Linha 5: Predição colorida por instâncias
+#         n_pred = (
+#             len(pred_masks)
+#             if isinstance(pred_masks, list)
+#             else len(np.unique(pred_label[pred_label > 0]))
+#         )
+#         err_str = f'{err:.3f}' if isinstance(err, float) else f'{err}'
+#         axes[4, idx].imshow(
+#             pred_masked, cmap=cmap_inst, interpolation='nearest'
+#         )
+#         axes[4, idx].set_title(
+#             f'Predição (Instâncias: {n_pred}) | Erro: {err_str}'
+#         )
+#         axes[4, idx].axis('off')
+
+#     # Legenda para as linhas 2 e 3 (classes ternárias)
+#     legend_elements = [
+#         mpatches.Patch(color='#1a1a1a', label='0: Fundo'),
+#         mpatches.Patch(color='#2b83ba', label='1: Interior'),
+#         mpatches.Patch(color='#d7191c', label='2: Fronteira'),
+#     ]
+#     fig.legend(
+#         handles=legend_elements,
+#         loc='lower center',
+#         ncol=3,
+#         bbox_to_anchor=(0.5, 0.005),
+#     )
+
+#     plt.tight_layout(rect=[0, 0.02, 1, 0.98])
 #     plt.show()
+
+
+
+
+
+
+
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.colors import ListedColormap
+
+
+def plot_samples(samples, batch_size=6):
+    """Layout: uma coluna por amostra, 5 linhas por figura.
+
+    Gera uma figura separada a cada `batch_size` amostras (padrão: 6).
+
+    1. Imagem original
+    2. Gabarito com fronteira (3 cores: fundo, interior, fronteira)
+    3. Predição com fronteira (3 cores: CNN argmax)
+    4. Gabarito de instâncias (múltiplas cores, fundo preto)
+    5. Predição de instâncias (múltiplas cores, fundo preto)
+
+    Espera tuplas no formato: (count_err, img_np, gt_t, pred_t, gt_masks,
+    pred_masks)
+    """
+    total_samples = len(samples)
+    if total_samples == 0:
+        print("Nenhuma amostra fornecida.")
+        return
+
+    # Colormaps compartilhados para evitar recriação a cada lote
+    cmap_ternary = ListedColormap(['#1a1a1a', '#2b83ba', '#d7191c'])
+    cmap_inst = plt.get_cmap('prism').copy()
+    cmap_inst.set_bad('black')
+
+    legend_elements = [
+        mpatches.Patch(color='#1a1a1a', label='0: Fundo'),
+        mpatches.Patch(color='#2b83ba', label='1: Interior'),
+        mpatches.Patch(color='#d7191c', label='2: Fronteira'),
+    ]
+
+    # Itera de 6 em 6 amostras
+    for batch_num, start_idx in enumerate(range(0, total_samples, batch_size)):
+        chunk = samples[start_idx : start_idx + batch_size]
+        n_samples = len(chunk)
+        end_idx = start_idx + n_samples
+
+        fig, axes = plt.subplots(
+            5, n_samples, figsize=(4 * n_samples, 20), squeeze=False
+        )
+
+        fig.suptitle(
+            f'Resultados - Amostras {start_idx + 1} a {end_idx} de {total_samples}',
+            fontsize=14,
+            fontweight='bold',
+        )
+
+        for col_idx, (
+            err,
+            img,
+            gt_ternary,
+            pred_ternary,
+            gt_masks,
+            pred_masks,
+        ) in enumerate(chunk):
+            H, W = img.shape[:2]
+
+            # Conversão das instâncias para mapas de rótulos com fundo 0 mascarado
+            gt_label = (
+                masks_to_label(gt_masks, (H, W))
+                if not (isinstance(gt_masks, np.ndarray) and gt_masks.ndim == 2)
+                else gt_masks
+            )
+            pred_label = (
+                masks_to_label(pred_masks, (H, W))
+                if not (
+                    isinstance(pred_masks, np.ndarray) and pred_masks.ndim == 2
+                )
+                else pred_masks
+            )
+
+            gt_masked = np.ma.masked_where(gt_label == 0, gt_label)
+            pred_masked = np.ma.masked_where(pred_label == 0, pred_label)
+
+            # Linha 1: Imagem Original
+            img_to_show = np.clip(img, 0, 1) if img.max() <= 1.0 else img
+            axes[0, col_idx].imshow(img_to_show)
+            axes[0, col_idx].set_title('Original')
+            axes[0, col_idx].axis('off')
+
+            # Linha 2: Gabarito com fronteira (3 cores)
+            axes[1, col_idx].imshow(
+                gt_ternary,
+                cmap=cmap_ternary,
+                vmin=0,
+                vmax=2,
+                interpolation='nearest',
+            )
+            axes[1, col_idx].set_title('Gabarito (Fronteira)')
+            axes[1, col_idx].axis('off')
+
+            # Linha 3: Predição com fronteira (3 cores)
+            axes[2, col_idx].imshow(
+                pred_ternary,
+                cmap=cmap_ternary,
+                vmin=0,
+                vmax=2,
+                interpolation='nearest',
+            )
+            axes[2, col_idx].set_title('Predição (Fronteira)')
+            axes[2, col_idx].axis('off')
+
+            # Linha 4: Gabarito colorido por instâncias
+            n_gt = (
+                len(gt_masks)
+                if isinstance(gt_masks, list)
+                else len(np.unique(gt_label[gt_label > 0]))
+            )
+            axes[3, col_idx].imshow(
+                gt_masked, cmap=cmap_inst, interpolation='nearest'
+            )
+            axes[3, col_idx].set_title(f'Gabarito (Instâncias: {n_gt})')
+            axes[3, col_idx].axis('off')
+
+            # Linha 5: Predição colorida por instâncias
+            n_pred = (
+                len(pred_masks)
+                if isinstance(pred_masks, list)
+                else len(np.unique(pred_label[pred_label > 0]))
+            )
+            err_str = f'{err:.3f}' if isinstance(err, float) else f'{err}'
+            axes[4, col_idx].imshow(
+                pred_masked, cmap=cmap_inst, interpolation='nearest'
+            )
+            axes[4, col_idx].set_title(
+                f'Predição (Instâncias: {n_pred}) | Erro: {err_str}'
+            )
+            axes[4, col_idx].axis('off')
+
+        # Legenda no rodapé da figura atual
+        fig.legend(
+            handles=legend_elements,
+            loc='lower center',
+            ncol=3,
+            bbox_to_anchor=(0.5, 0.005),
+        )
+        fig.savefig(
+            f'samples_batch_{batch_num + 1}.png',
+            dpi=300,
+            bbox_inches='tight',
+        )
+        plt.tight_layout(rect=[0, 0.02, 1, 0.98])
+        plt.show()
