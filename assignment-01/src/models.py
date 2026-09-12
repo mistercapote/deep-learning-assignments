@@ -2,6 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import resnet34, ResNet34_Weights
+from PIL import Image
+import numpy as np
+from skimage.measure import label, regionprops
+import glob
+from pathlib import Path
+from scipy.ndimage import binary_dilation
 
 
 class UNetBinary(nn.Module):
@@ -332,16 +338,15 @@ class PSPNetTernary(nn.Module):
 
 
 class UNetTernaryDilated(nn.Module):
-
     def __init__(self, dilation=2):
         super().__init__()
 
         # ============================================================
-        # ENCODER
+        # ENCODER — MESMO RESNET-34 DA UNETTERNARY
         # ============================================================
 
-        resnet = resnet18(
-            weights=ResNet18_Weights.IMAGENET1K_V1
+        resnet = resnet34(
+            weights=ResNet34_Weights.IMAGENET1K_V1
         )
 
         self.enc1 = nn.Sequential(
@@ -352,24 +357,27 @@ class UNetTernaryDilated(nn.Module):
 
         self.pool = resnet.maxpool
 
-        self.enc2 = resnet.layer1
-        self.enc3 = resnet.layer2
-        self.enc4 = resnet.layer3
+        self.enc2 = resnet.layer1   # 64 canais
+        self.enc3 = resnet.layer2   # 128 canais
+        self.enc4 = resnet.layer3   # 256 canais
 
         # ============================================================
-        # DILATION NO LAYER 3
+        # ATRous CONVOLUTION
+        #
+        # Mantemos a resolução de saída de enc4 igual à de enc3,
+        # removendo o downsampling do primeiro bloco.
         # ============================================================
 
         for i, block in enumerate(self.enc4):
 
-            # Retira o downsampling do primeiro bloco
+            # Remove o downsampling do primeiro bloco
             if i == 0:
                 block.conv1.stride = (1, 1)
 
                 if block.downsample is not None:
                     block.downsample[0].stride = (1, 1)
 
-            # dilation
+            # Atrous / dilated convolution
             block.conv1.dilation = (dilation, dilation)
             block.conv1.padding = (dilation, dilation)
 
@@ -378,49 +386,103 @@ class UNetTernaryDilated(nn.Module):
 
         # ============================================================
         # DECODER
+        #
+        # Como enc4 agora possui a mesma resolução espacial de enc3,
+        # up3 NÃO deve fazer upsampling.
         # ============================================================
 
         self.up3 = nn.Conv2d(
-            256, 128,
+            256,
+            128,
             kernel_size=1
         )
 
         self.dec3 = nn.Sequential(
             nn.Conv2d(
-                256, 128,
+                256,
+                128,
                 kernel_size=3,
                 padding=1
             ),
             nn.ReLU()
+        )
+
+        # H/8 -> H/4
+        self.up2 = nn.ConvTranspose2d(
+            128,
+            64,
+            kernel_size=2,
+            stride=2
         )
 
         self.dec2 = nn.Sequential(
             nn.Conv2d(
-                128, 64,
+                128,
+                64,
                 kernel_size=3,
                 padding=1
             ),
             nn.ReLU()
+        )
+
+        # H/4 -> H/2
+        self.up1 = nn.ConvTranspose2d(
+            64,
+            64,
+            kernel_size=2,
+            stride=2
         )
 
         self.dec1 = nn.Sequential(
             nn.Conv2d(
-                128, 64,
+                128,
+                64,
                 kernel_size=3,
                 padding=1
             ),
             nn.ReLU()
         )
 
-        self.up0 = nn.Conv2d(
-            64, 32,
-            kernel_size=3,
-            padding=1
+        # H/2 -> H
+        self.up0 = nn.ConvTranspose2d(
+            64,
+            32,
+            kernel_size=2,
+            stride=2
         )
 
-        self.segmentation_head = nn.Conv2d(
-            32, 3,
+        self.dec0 = nn.Sequential(
+            nn.Conv2d(
+                32,
+                32,
+                kernel_size=3,
+                padding=1
+            ),
+            nn.ReLU()
+        )
+
+        # ============================================================
+        # HEADS DA TRILHA A
+        # ============================================================
+
+        # 3 classes:
+        # 0 = background
+        # 1 = interior
+        # 2 = boundary
+        self.final_cls = nn.Conv2d(
+            32,
+            3,
             kernel_size=1
+        )
+
+        # Mapa contínuo de distância
+        self.final_dist = nn.Sequential(
+            nn.Conv2d(
+                32,
+                1,
+                kernel_size=1
+            ),
+            nn.Sigmoid()
         )
 
     def forward(self, x):
@@ -429,56 +491,231 @@ class UNetTernaryDilated(nn.Module):
         # ENCODER
         # ============================================================
 
-        x1 = self.enc1(x)                 # H/2
-        x2 = self.enc2(self.pool(x1))     # H/4
-        x3 = self.enc3(x2)                # H/8
-        x4 = self.enc4(x3)                # H/8 (dilation)
+        x1 = self.enc1(x)
+        x2 = self.enc2(self.pool(x1))
+        x3 = self.enc3(x2)
+        x4 = self.enc4(x3)
 
         # ============================================================
         # DECODER
         # ============================================================
 
-        # x4 e x3 têm a mesma resolução
+        # x4 e x3 possuem a mesma resolução espacial
         d3 = self.dec3(
-            torch.cat([
-                self.up3(x4),
-                x3
-            ], dim=1)
+            torch.cat(
+                [self.up3(x4), x3],
+                dim=1
+            )
         )
 
         # H/8 -> H/4
-        d3_up = F.interpolate(
-            d3,
-            size=x2.shape[-2:],
-            mode="bilinear",
-            align_corners=False
+        d2 = self.dec2(
+            torch.cat(
+                [self.up2(d3), x2],
+                dim=1
+            )
         )
-
-        d2 = self.dec2(d3_up)
 
         # H/4 -> H/2
-        d2_up = F.interpolate(
-            d2,
-            size=x1.shape[-2:],
-            mode="bilinear",
-            align_corners=False
-        )
-
         d1 = self.dec1(
-            torch.cat([
-                d2_up,
-                x1
-            ], dim=1)
+            torch.cat(
+                [self.up1(d2), x1],
+                dim=1
+            )
         )
 
         # H/2 -> H
-        d1_up = F.interpolate(
-            d1,
-            size=x.shape[-2:],
-            mode="bilinear",
-            align_corners=False
+        d0 = self.dec0(self.up0(d1))
+
+        # ============================================================
+        # SAÍDAS
+        # ============================================================
+
+        logits_cls = self.final_cls(d0)
+        dist_pred = self.final_dist(d0)
+
+        return logits_cls, dist_pred
+    
+def update_rf(r, jump, kernel, stride=1, dilation=1):
+    """
+    Atualiza receptive field e jump para uma operação convolucional/pooling.
+    """
+    r = r + ((kernel - 1) * dilation) * jump
+    jump = jump * stride
+    return r, jump
+
+def resnet34_encoder_rf(model):
+    r = 1
+    jump = 1
+
+    # conv1: 7x7, stride 2
+    r, jump = update_rf(r, jump, kernel=7, stride=2)
+
+    # MaxPool: 3x3, stride 2
+    r, jump = update_rf(r, jump, kernel=3, stride=2)
+
+    # layer1
+    for block in model.enc2:
+        r, jump = update_rf(
+            r, jump,
+            kernel=3,
+            stride=block.conv1.stride[0],
+            dilation=block.conv1.dilation[0]
+        )
+        r, jump = update_rf(
+            r, jump,
+            kernel=3,
+            stride=block.conv2.stride[0],
+            dilation=block.conv2.dilation[0]
         )
 
-        d0 = self.up0(d1_up)
+    # layer2
+    for block in model.enc3:
+        r, jump = update_rf(
+            r, jump,
+            kernel=3,
+            stride=block.conv1.stride[0],
+            dilation=block.conv1.dilation[0]
+        )
+        r, jump = update_rf(
+            r, jump,
+            kernel=3,
+            stride=block.conv2.stride[0],
+            dilation=block.conv2.dilation[0]
+        )
 
-        return self.segmentation_head(d0)
+    # layer3
+    for block in model.enc4:
+        r, jump = update_rf(
+            r, jump,
+            kernel=3,
+            stride=block.conv1.stride[0],
+            dilation=block.conv1.dilation[0]
+        )
+        r, jump = update_rf(
+            r, jump,
+            kernel=3,
+            stride=block.conv2.stride[0],
+            dilation=block.conv2.dilation[0]
+        )
+
+    return r, jump
+
+
+IMG_SIZE=256
+
+
+def object_diameters(train_dir, target_size=IMG_SIZE):
+    """
+    Calcula o diâmetro equivalente das instâncias na mesma escala
+    espacial usada como entrada do modelo.
+
+    As máscaras são redimensionadas para target_size x target_size
+    antes da medição.
+    """
+
+    diameters = []
+
+    mask_paths = glob.glob(
+        str(train_dir / "*" / "masks" / "*.png")
+    )
+
+    for p in mask_paths:
+
+        mask = np.array(Image.open(p))
+
+        # Redimensiona usando nearest neighbor para preservar os rótulos
+        mask_resized = np.array(
+            Image.fromarray(mask.astype(np.uint8)).resize(
+                (target_size, target_size),
+                resample=Image.Resampling.NEAREST
+            )
+        )
+
+        lab = label(mask_resized > 0)
+
+        for region in regionprops(lab):
+            diameters.append(
+                region.equivalent_diameter_area
+            )
+
+    return np.array(diameters)
+
+
+
+
+def instance_gt_to_ternary(instance_gt, boundary_width=2):
+    """
+    Converte o ground truth de instâncias em um rótulo ternário.
+
+    Rótulos:
+        0 = fundo
+        1 = interior da instância
+        2 = fronteira entre instâncias
+
+    A fronteira é definida pelos pixels que pertencem à região
+    de dilatação de pelo menos duas instâncias diferentes.
+    """
+
+    ids = np.unique(instance_gt)
+    ids = ids[ids != 0]
+
+    # Caso não existam instâncias
+    if len(ids) == 0:
+        return np.zeros(
+            instance_gt.shape,
+            dtype=np.int64
+        )
+
+    struct = np.ones((3, 3), dtype=bool)
+
+    # Conta quantas instâncias dilatadas cobrem cada pixel
+    dilated_sum = np.zeros(
+        instance_gt.shape,
+        dtype=np.uint16
+    )
+
+    for i in ids:
+
+        inst_mask = instance_gt == i
+
+        dilated = binary_dilation(
+            inst_mask,
+            structure=struct,
+            iterations=boundary_width
+        )
+
+        dilated_sum += dilated.astype(np.uint16)
+
+    # Região onde pelo menos duas instâncias se aproximam
+    boundary = dilated_sum > 1
+
+    # Interior: pertence a uma instância, mas não à fronteira
+    interior = (instance_gt > 0) & ~boundary
+
+    # Rótulo ternário
+    ternary = np.zeros(
+        instance_gt.shape,
+        dtype=np.int64
+    )
+
+    ternary[interior] = 1
+    ternary[boundary] = 2
+
+    return ternary
+
+
+def load_instance_gt(mask_dir):
+    """Empilha as máscaras individuais do DSB2018 em um único array rotulado (H, W)."""
+    mask_dir = Path(mask_dir)
+    gt = None
+
+    for i, p in enumerate(sorted(mask_dir.glob("*.png")), start=1):
+        m = np.array(Image.open(p)) > 0
+
+        if gt is None:
+            gt = np.zeros(m.shape, dtype=np.int32)
+
+        gt[m] = i
+
+    return gt
