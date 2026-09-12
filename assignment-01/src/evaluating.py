@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from skimage.segmentation import watershed
 import numpy as np
 from scipy import ndimage
+import pandas as pd
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'xpu' if hasattr(torch, 'xpu') and torch.xpu.is_available() else 'cpu')
 IOU_THRESHOLDS = np.arange(0.50, 1.00, 0.05)
@@ -191,6 +192,7 @@ def evaluate_instances_ternary(
 		fg_thresh=0.5,
 		min_marker_size=5,
 		k_samples=6,
+		csv_path=None
 ):
 	"""Avaliação idêntica à Parte 1: matching guloso por IoU decrescente."""
 	model.eval()
@@ -202,8 +204,9 @@ def evaluate_instances_ternary(
 	densities = []
 	per_image_aps = []
 	samples = []
+	records = []
 
-	for images, _, _, instance_masks_batch, _ in loader:
+	for images, _, _, instance_masks_batch, ids in loader:
 		images = images.to(DEVICE)
 		logits_cls, dist_pred = model(images)
 		probs_batch = F.softmax(logits_cls, dim=1).cpu().numpy()
@@ -229,10 +232,24 @@ def evaluate_instances_ternary(
 
 			if n_pred == 0 and n_gt == 0:
 				per_image_aps.append(1.0)
+				records.append({
+                    "id": ids[b],
+                    "n_gt": n_gt,
+                    "n_pred": n_pred,
+                    "count_error": count_err,
+                    "mAP_image": 1.0,
+                })
 				continue
 			if n_pred == 0 or n_gt == 0:
 				denom_total += n_pred + n_gt
 				per_image_aps.append(0.0)
+				records.append({
+                    "id": ids[b],
+                    "n_gt": n_gt,
+                    "n_pred": n_pred,
+                    "count_error": count_err,
+                    "mAP_image": 0.0,
+                })
 				continue
 
 			# Matriz de IoU Vetorizada
@@ -271,8 +288,18 @@ def evaluate_instances_ternary(
 				tp_total[k] += tp
 				denom_total[k] += denom
 
-			per_image_aps.append(float(img_aps.mean()))
+			mAP_img = float(img_aps.mean())
+			per_image_aps.append(mAP_img)
+			records.append({
+                "id": ids[b],
+                "n_gt": n_gt,
+                "n_pred": n_pred,
+                "count_error": count_err,
+                "mAP_image": mAP_img,
+            })
 
+	if csv_path is not None:
+		pd.DataFrame(records).to_csv(csv_path, index=False)
 	aps = np.where(denom_total > 0, tp_total / denom_total, 1.0)
 	samples.sort(key=lambda s: -s[0])
 	return aps, count_errors, densities, per_image_aps, samples[:k_samples]
