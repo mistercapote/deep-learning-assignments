@@ -1,9 +1,7 @@
 import torch
 import torch.nn as nn
-from torchvision.models import resnet18, ResNet18_Weights, resnet50, ResNet50_Weights
 import torch.nn.functional as F
 from torchvision.models import resnet34, ResNet34_Weights
-
 
 
 class UNetBinary(nn.Module):
@@ -78,42 +76,10 @@ class UNetTernary(nn.Module):
 		return logits_cls, dist_pred
 
 
-    
-class UNetDDimensional(nn.Module):
-    def __init__(self, D=1) :
-        super().__init__()
-        resnet = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-        
-        # ENCODER
-        self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu) # 64x64
-        self.pool = resnet.maxpool # 32x32
-        self.enc2 = resnet.layer1  # 32x32, 64 canais
-        self.enc3 = resnet.layer2  # 16x16, 128 canais
-        self.enc4 = resnet.layer3  # 8x8, 256 canais
 
-        # DECODER
-        self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.dec3 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=3, padding=1), nn.ReLU())
-        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.dec2 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
-        self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
-        self.dec1 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
-        self.up0 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
-        self.semantic_head = nn.Conv2d(32, 1, kernel_size=1) 
-        self.embed_head = nn.Conv2d(32, D, 1) # D canais de saída
 
-    def forward(self, x):
-        x1 = self.enc1(x)
-        x2 = self.enc2(self.pool(x1))
-        x3 = self.enc3(x2)
-        x4 = self.enc4(x3)
 
-        d3 = self.dec3(torch.cat([self.up3(x4), x3], dim=1))
-        d2 = self.dec2(torch.cat([self.up2(d3), x2], dim=1))
-        d1 = self.dec1(torch.cat([self.up1(d2), x1], dim=1))
-        d0 = self.up0(d1)
-        
-        return self.semantic_head(d0),  self.embed_head(d0) 
+
 
 
 class ASPP(nn.Module):
@@ -129,91 +95,6 @@ class ASPP(nn.Module):
         x = torch.cat([self.conv1x1(x), self.conv3x3_1(x), self.conv3x3_2(x), self.conv3x3_3(x)], dim=1)
         return self.out_conv(x)
 
-
-class DeepLabDDimensional(nn.Module):
-    def __init__(self, D=2):
-        super().__init__()
-        resnet = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1, replace_stride_with_dilation=[False, False, True])
-        
-        # ENCODER (Mesmo do UNetDDimensional)
-        self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu) 
-        self.pool = resnet.maxpool 
-        self.enc2 = resnet.layer1  
-        self.enc3 = resnet.layer2  
-        self.enc4 = resnet.layer3  # Saída: 8x8, 1024 canais
-
-        # BOTTLENECK: Substitui as Skip Connections pelo ASPP
-        self.aspp = ASPP(in_channels=1024, out_channels=128)
-        
-        # DECODER: Upsampling direto (sem skip connections)
-        self.up_conv = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=4),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=4),
-            nn.ReLU()
-        )
-        
-        self.semantic_head = nn.Conv2d(32, 1, kernel_size=1) 
-        self.embed_head = nn.Conv2d(32, D, 1)
-
-
-    def forward(self, x):
-        x = self.enc1(x)
-        x = self.pool(x)
-        x = self.enc2(x)
-        x = self.enc3(x)
-        x4 = self.enc4(x)
-        
-        x_aspp = self.aspp(x4)
-        d0 = self.up_conv(x_aspp)
-        
-        return self.semantic_head(d0), self.embed_head(d0)
-
-
-class SegNetDDimensional(nn.Module):
-    def __init__(self, D=2):
-        super().__init__()
-        
-        # ENCODER (Estrutura padrão adaptada para extrair Pool Indices)
-        self.enc_conv1 = nn.Sequential(nn.Conv2d(3, 64, kernel_size=3, padding=1), nn.BatchNorm2d(64), nn.ReLU())
-        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2, return_indices=True)
-        self.enc_conv2 = nn.Sequential(nn.Conv2d(64, 128, kernel_size=3, padding=1), nn.BatchNorm2d(128), nn.ReLU())
-        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2, return_indices=True)
-        self.enc_conv3 = nn.Sequential(nn.Conv2d(128, 256, kernel_size=3, padding=1), nn.BatchNorm2d(256), nn.ReLU())
-        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2, return_indices=True)
-
-        # DECODER (Max Unpooling utilizando os índices memorizados)
-        self.unpool3 = nn.MaxUnpool2d(kernel_size=2, stride=2)
-        self.dec_conv3 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=3, padding=1), nn.BatchNorm2d(128), nn.ReLU())
-        self.unpool2 = nn.MaxUnpool2d(kernel_size=2, stride=2)
-        self.dec_conv2 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.BatchNorm2d(64), nn.ReLU())
-        self.unpool1 = nn.MaxUnpool2d(kernel_size=2, stride=2)
-        self.dec_conv1 = nn.Sequential(nn.Conv2d(64, 32, kernel_size=3, padding=1), nn.BatchNorm2d(32), nn.ReLU())
-        # HEADS (Semântico e Instância)
-        self.semantic_head = nn.Conv2d(32, 1, kernel_size=1)
-        self.embed_head = nn.Conv2d(32, D, 1)
-
-    def forward(self, x):
-        x1 = self.enc_conv1(x)
-        size1 = x1.size()
-        x1_pooled, idx1 = self.pool1(x1)
-        x2 = self.enc_conv2(x1_pooled)
-        size2 = x2.size()
-        x2_pooled, idx2 = self.pool2(x2)
-    
-        x3 = self.enc_conv3(x2_pooled)
-        size3 = x3.size()
-        x3_pooled, idx3 = self.pool3(x3)
-
-        # Expansão: Recupera a resolução usando os índices correspondentes
-        d3 = self.unpool3(x3_pooled, idx3, output_size=size3)
-        d3 = self.dec_conv3(d3)
-        d2 = self.unpool2(d3, idx2, output_size=size2)
-        d2 = self.dec_conv2(d2)
-        d1 = self.unpool1(d2, idx1, output_size=size1)
-        d1 = self.dec_conv1(d1)
-
-        return self.semantic_head(d1), self.embed_head(d1)
 
 
 class PPM(nn.Module):
@@ -244,47 +125,6 @@ class PPM(nn.Module):
         return out 
 
 
-class PSPNetDDimensional(nn.Module):
-    def __init__(self, D=1) :
-        super().__init__()
-        resnet = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-        
-        # ENCODER
-        self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu) # 64x64
-        self.pool = resnet.maxpool # 32x32
-        self.enc2 = resnet.layer1  # 32x32, 64 canais
-        self.enc3 = resnet.layer2  # 16x16, 128 canais
-        self.enc4 = resnet.layer3  # 8x8, 256 canais
-
-        # Parte adicionada
-        self.ppm = PPM(in_channels=256) 
-
-        # DECODER
-        self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.dec3 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=3, padding=1), nn.ReLU())
-        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.dec2 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
-        self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
-        self.dec1 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
-        self.up0 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
-        self.semantic_head = nn.Conv2d(32, 1, kernel_size=1) 
-        self.embed_head = nn.Conv2d(32, D, 1) # D canais de saída
-
-    def forward(self, x):
-        x1 = self.enc1(x)
-        x2 = self.enc2(self.pool(x1))
-        x3 = self.enc3(x2)
-        x4 = self.enc4(x3)
-
-        d3 = self.dec3(torch.cat([self.up3(self.ppm(x4)), x3], dim=1)) # ideia de skipp connetions
-        d2 = self.dec2(torch.cat([self.up2(d3), x2], dim=1))
-        d1 = self.dec1(torch.cat([self.up1(d2), x1], dim=1))
-        d0 = self.up0(d1)
-
-        return self.semantic_head(d0),  self.embed_head(d0) 
-
-
-
 class ParseModule(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
@@ -299,23 +139,122 @@ class ParseModule(nn.Module):
         return out
 
 
-class ParseNetDDimensional(nn.Module):
 
-    def __init__(self, D=2):
+
+
+# ==============================================================================
+# EIXO 1: Mecanismo de Resolução 2 - Atrous Convolution + ASPP (DeepLab Ternary)
+# Configurada com o MESMO encoder (ResNet-34) da U-Net Ternary
+# ==============================================================================
+class DeepLabTernary(nn.Module):
+    def __init__(self):
         super().__init__()
+        resnet = resnet34(weights=ResNet34_Weights.IMAGENET1K_V1)
+        
+        # ENCODER: idêntico ao da UNetTernary (ResNet-34)
+        self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu) 
+        self.pool = resnet.maxpool 
+        self.enc2 = resnet.layer1  # 64 canais
+        self.enc3 = resnet.layer2  # 128 canais
+        self.enc4 = resnet.layer3  # 256 canais
+
+        # BOTTLENECK: ASPP mantendo output stride
+        self.aspp = ASPP(in_channels=256, out_channels=128)
+        
+        # DECODER: Upsampling direto (sem skip connections)
+        self.up_conv = nn.Sequential(
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=4),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=4),
+            nn.ReLU()
+        )
+        
+        # HEADS TERNÁRIOS
+        self.final_cls = nn.Conv2d(32, 3, kernel_size=1)
+        self.final_dist = nn.Sequential(nn.Conv2d(32, 1, kernel_size=1), nn.Sigmoid())
+
+    def forward(self, x):
+        x = self.enc1(x)
+        x = self.pool(x)
+        x = self.enc2(x)
+        x = self.enc3(x)
+        x4 = self.enc4(x)
+        
+        x_aspp = self.aspp(x4)
+        d0 = self.up_conv(x_aspp)
+        
+        logits_cls = self.final_cls(d0)
+        dist_pred = self.final_dist(d0)
+        return logits_cls, dist_pred
 
 
+# ==============================================================================
+# EIXO 1: Mecanismo de Resolução 3 - Pool Indices (SegNet Ternary)
+# ==============================================================================
+class SegNetTernary(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # ENCODER com MaxPool que memoriza índices
+        self.enc_conv1 = nn.Sequential(nn.Conv2d(3, 64, kernel_size=3, padding=1), nn.BatchNorm2d(64), nn.ReLU())
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2, return_indices=True)
+        self.enc_conv2 = nn.Sequential(nn.Conv2d(64, 128, kernel_size=3, padding=1), nn.BatchNorm2d(128), nn.ReLU())
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2, return_indices=True)
+        self.enc_conv3 = nn.Sequential(nn.Conv2d(128, 256, kernel_size=3, padding=1), nn.BatchNorm2d(256), nn.ReLU())
+        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2, return_indices=True)
 
-        resnet = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-                
-        # ENCODER
-        self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu) # 64x64
-        self.pool = resnet.maxpool # 32x32
-        self.enc2 = resnet.layer1  # 32x32, 64 canais
-        self.enc3 = resnet.layer2  # 16x16, 128 canais
-        self.enc4 = resnet.layer3  # 8x8, 256 canais
+        # DECODER com MaxUnpooling usando índices
+        self.unpool3 = nn.MaxUnpool2d(kernel_size=2, stride=2)
+        self.dec_conv3 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=3, padding=1), nn.BatchNorm2d(128), nn.ReLU())
+        self.unpool2 = nn.MaxUnpool2d(kernel_size=2, stride=2)
+        self.dec_conv2 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.BatchNorm2d(64), nn.ReLU())
+        self.unpool1 = nn.MaxUnpool2d(kernel_size=2, stride=2)
+        self.dec_conv1 = nn.Sequential(nn.Conv2d(64, 32, kernel_size=3, padding=1), nn.BatchNorm2d(32), nn.ReLU())
 
-        # DECODER
+        # HEADS TERNÁRIOS
+        self.final_cls = nn.Conv2d(32, 3, kernel_size=1)
+        self.final_dist = nn.Sequential(nn.Conv2d(32, 1, kernel_size=1), nn.Sigmoid())
+
+    def forward(self, x):
+        x1 = self.enc_conv1(x)
+        size1 = x1.size()
+        x1_p, idx1 = self.pool1(x1)
+
+        x2 = self.enc_conv2(x1_p)
+        size2 = x2.size()
+        x2_p, idx2 = self.pool2(x2)
+
+        x3 = self.enc_conv3(x2_p)
+        size3 = x3.size()
+        x3_p, idx3 = self.pool3(x3)
+
+        d3 = self.unpool3(x3_p, idx3, output_size=size3)
+        d3 = self.dec_conv3(d3)
+        d2 = self.unpool2(d3, idx2, output_size=size2)
+        d2 = self.dec_conv2(d2)
+        d1 = self.unpool1(d2, idx1, output_size=size1)
+        d1 = self.dec_conv1(d1)
+
+        logits_cls = self.final_cls(d1)
+        dist_pred = self.final_dist(d1)
+        return logits_cls, dist_pred
+
+
+# ==============================================================================
+# EIXO 3: Contexto Global 1 - Image Pooling (ParseNet Ternary)
+# ==============================================================================
+class ParseNetTernary(nn.Module):
+    def __init__(self):
+        super().__init__()
+        resnet = resnet34(weights=ResNet34_Weights.IMAGENET1K_V1)
+        self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu)
+        self.pool = resnet.maxpool
+        self.enc2 = resnet.layer1
+        self.enc3 = resnet.layer2
+        self.enc4 = resnet.layer3
+
+        self.parse = ParseModule(in_channels=256, out_channels=256)
+        self.proj = nn.Conv2d(in_channels=512, out_channels=256, kernel_size=1)
+
         self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
         self.dec3 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=3, padding=1), nn.ReLU())
         self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
@@ -323,101 +262,69 @@ class ParseNetDDimensional(nn.Module):
         self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
         self.dec1 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
         self.up0 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+        self.dec0 = nn.Sequential(nn.Conv2d(32, 32, kernel_size=3, padding=1), nn.ReLU())
 
-        self.semantic_head = nn.Conv2d(32, 1, kernel_size=1) 
-        self.embed_head = nn.Conv2d(32, D, 1) # D canais de saída
-
-        self.parse = ParseModule(in_channels=256, out_channels=256)
-        self.proj = nn.Conv2d(in_channels=512, out_channels=256, kernel_size=1)  # 
+        self.final_cls = nn.Conv2d(32, 3, kernel_size=1)
+        self.final_dist = nn.Sequential(nn.Conv2d(32, 1, kernel_size=1), nn.Sigmoid())
 
     def forward(self, x):
         x1 = self.enc1(x)
         x2 = self.enc2(self.pool(x1))
         x3 = self.enc3(x2)
         x4 = self.enc4(x3)
-        # Bottleneck
-        bottleneck= self.proj(self.parse(x4))
 
-        d3 = self.dec3(torch.cat([self.up3(bottleneck), x3], dim=1)) # ideia de skipp connetions
+        bottleneck = self.proj(self.parse(x4))
+
+        d3 = self.dec3(torch.cat([self.up3(bottleneck), x3], dim=1))
         d2 = self.dec2(torch.cat([self.up2(d3), x2], dim=1))
         d1 = self.dec1(torch.cat([self.up1(d2), x1], dim=1))
-        d0 = self.up0(d1)
+        d0 = self.dec0(self.up0(d1))
 
-        return self.semantic_head(d0), self.embed_head(d0)
-
-
-class UNetTernary(nn.Module):
-	def __init__(self):
-		super().__init__()
-		resnet = resnet34(weights=ResNet34_Weights.IMAGENET1K_V1)
-		
-		self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu)
-		self.pool = resnet.maxpool
-		self.enc2 = resnet.layer1
-		self.enc3 = resnet.layer2
-		self.enc4 = resnet.layer3
-
-		self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-		self.dec3 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=3, padding=1), nn.ReLU())
-		self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-		self.dec2 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
-		self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
-		self.dec1 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
-		self.up0 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
-		self.dec0 = nn.Sequential(nn.Conv2d(32, 32, kernel_size=3, padding=1), nn.ReLU())
-		self.final_cls = nn.Conv2d(32, 3, kernel_size=1)
-		self.final_dist = nn.Sequential(nn.Conv2d(32, 1, kernel_size=1), nn.Sigmoid())
-
-	def forward(self, x):
-		x1 = self.enc1(x)
-		x2 = self.enc2(self.pool(x1))
-		x3 = self.enc3(x2)
-		x4 = self.enc4(x3)
-
-		d3 = self.dec3(torch.cat([self.up3(x4), x3], dim=1))
-		d2 = self.dec2(torch.cat([self.up2(d3), x2], dim=1))
-		d1 = self.dec1(torch.cat([self.up1(d2), x1], dim=1))
-		d0 = self.dec0(self.up0(d1))
-
-		logits_cls = self.final_cls(d0)
-		dist_pred = self.final_dist(d0)
-		return logits_cls, dist_pred
+        logits_cls = self.final_cls(d0)
+        dist_pred = self.final_dist(d0)
+        return logits_cls, dist_pred
 
 
-class DeepLabResNet18(nn.Module):
-    """
-    Variante do DeepLab com ASPP utilizando estritamente o MESMO encoder (ResNet-18)
-    da UNetDDimensional, atendendo à exigência de controle de backbone do Eixo 1.
-    """
-    def __init__(self, D: int = 1):
+# ==============================================================================
+# EIXO 3: Contexto Global 2 - Pyramid Pooling (PSPNet Ternary)
+# ==============================================================================
+class PSPNetTernary(nn.Module):
+    def __init__(self):
         super().__init__()
-        resnet = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-        self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu)  # 64x64
-        self.pool = resnet.maxpool                                        # 32x32
-        self.enc2 = resnet.layer1                                         # 32x32, 64 canais
-        self.enc3 = resnet.layer2                                         # 16x16, 128 canais
-        self.enc4 = resnet.layer3                                         # 8x8, 256 canais
+        resnet = resnet34(weights=ResNet34_Weights.IMAGENET1K_V1)
+        self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu)
+        self.pool = resnet.maxpool
+        self.enc2 = resnet.layer1
+        self.enc3 = resnet.layer2
+        self.enc4 = resnet.layer3
 
-        # ASPP adaptado aos 256 canais da ResNet-18
-        self.aspp = ASPP(in_channels=256, out_channels=128)
-        self.up_conv = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=4),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=4),
-            nn.ReLU(),
-        )
-        self.semantic_head = nn.Conv2d(32, 1, kernel_size=1)
-        self.embed_head = nn.Conv2d(32, D, 1)
+        self.ppm = PPM(in_channels=256)
 
-    def forward(self, x: torch.Tensor):
+        self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.dec3 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=3, padding=1), nn.ReLU())
+        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.dec2 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
+        self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
+        self.dec1 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
+        self.up0 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+        self.dec0 = nn.Sequential(nn.Conv2d(32, 32, kernel_size=3, padding=1), nn.ReLU())
+
+        self.final_cls = nn.Conv2d(32, 3, kernel_size=1)
+        self.final_dist = nn.Sequential(nn.Conv2d(32, 1, kernel_size=1), nn.Sigmoid())
+
+    def forward(self, x):
         x1 = self.enc1(x)
         x2 = self.enc2(self.pool(x1))
         x3 = self.enc3(x2)
         x4 = self.enc4(x3)
 
-        x_aspp = self.aspp(x4)
-        d0 = self.up_conv(x_aspp)
-        return self.semantic_head(d0), self.embed_head(d0)
+        bottleneck = self.ppm(x4)
 
+        d3 = self.dec3(torch.cat([self.up3(bottleneck), x3], dim=1))
+        d2 = self.dec2(torch.cat([self.up2(d3), x2], dim=1))
+        d1 = self.dec1(torch.cat([self.up1(d2), x1], dim=1))
+        d0 = self.dec0(self.up0(d1))
 
-
+        logits_cls = self.final_cls(d0)
+        dist_pred = self.final_dist(d0)
+        return logits_cls, dist_pred
