@@ -328,3 +328,157 @@ class PSPNetTernary(nn.Module):
         logits_cls = self.final_cls(d0)
         dist_pred = self.final_dist(d0)
         return logits_cls, dist_pred
+
+
+
+class UNetTernaryDilated(nn.Module):
+
+    def __init__(self, dilation=2):
+        super().__init__()
+
+        # ============================================================
+        # ENCODER
+        # ============================================================
+
+        resnet = resnet18(
+            weights=ResNet18_Weights.IMAGENET1K_V1
+        )
+
+        self.enc1 = nn.Sequential(
+            resnet.conv1,
+            resnet.bn1,
+            resnet.relu
+        )
+
+        self.pool = resnet.maxpool
+
+        self.enc2 = resnet.layer1
+        self.enc3 = resnet.layer2
+        self.enc4 = resnet.layer3
+
+        # ============================================================
+        # DILATION NO LAYER 3
+        # ============================================================
+
+        for i, block in enumerate(self.enc4):
+
+            # Retira o downsampling do primeiro bloco
+            if i == 0:
+                block.conv1.stride = (1, 1)
+
+                if block.downsample is not None:
+                    block.downsample[0].stride = (1, 1)
+
+            # dilation
+            block.conv1.dilation = (dilation, dilation)
+            block.conv1.padding = (dilation, dilation)
+
+            block.conv2.dilation = (dilation, dilation)
+            block.conv2.padding = (dilation, dilation)
+
+        # ============================================================
+        # DECODER
+        # ============================================================
+
+        self.up3 = nn.Conv2d(
+            256, 128,
+            kernel_size=1
+        )
+
+        self.dec3 = nn.Sequential(
+            nn.Conv2d(
+                256, 128,
+                kernel_size=3,
+                padding=1
+            ),
+            nn.ReLU()
+        )
+
+        self.dec2 = nn.Sequential(
+            nn.Conv2d(
+                128, 64,
+                kernel_size=3,
+                padding=1
+            ),
+            nn.ReLU()
+        )
+
+        self.dec1 = nn.Sequential(
+            nn.Conv2d(
+                128, 64,
+                kernel_size=3,
+                padding=1
+            ),
+            nn.ReLU()
+        )
+
+        self.up0 = nn.Conv2d(
+            64, 32,
+            kernel_size=3,
+            padding=1
+        )
+
+        self.segmentation_head = nn.Conv2d(
+            32, 3,
+            kernel_size=1
+        )
+
+    def forward(self, x):
+
+        # ============================================================
+        # ENCODER
+        # ============================================================
+
+        x1 = self.enc1(x)                 # H/2
+        x2 = self.enc2(self.pool(x1))     # H/4
+        x3 = self.enc3(x2)                # H/8
+        x4 = self.enc4(x3)                # H/8 (dilation)
+
+        # ============================================================
+        # DECODER
+        # ============================================================
+
+        # x4 e x3 têm a mesma resolução
+        d3 = self.dec3(
+            torch.cat([
+                self.up3(x4),
+                x3
+            ], dim=1)
+        )
+
+        # H/8 -> H/4
+        d3_up = F.interpolate(
+            d3,
+            size=x2.shape[-2:],
+            mode="bilinear",
+            align_corners=False
+        )
+
+        d2 = self.dec2(d3_up)
+
+        # H/4 -> H/2
+        d2_up = F.interpolate(
+            d2,
+            size=x1.shape[-2:],
+            mode="bilinear",
+            align_corners=False
+        )
+
+        d1 = self.dec1(
+            torch.cat([
+                d2_up,
+                x1
+            ], dim=1)
+        )
+
+        # H/2 -> H
+        d1_up = F.interpolate(
+            d1,
+            size=x.shape[-2:],
+            mode="bilinear",
+            align_corners=False
+        )
+
+        d0 = self.up0(d1_up)
+
+        return self.segmentation_head(d0)
