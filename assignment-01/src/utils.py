@@ -50,7 +50,7 @@ def masks_to_label(masks, shape):
     return label
 
     
-def plot_samples(samples):
+def plot_samples_binary(samples):
     """
     Layout: uma coluna por amostra, 3 linhas (original / gabarito / predição),
     cada instância com uma cor distinta via nipy_spectral (fundo forçado a
@@ -224,136 +224,7 @@ def plot_training_curves_ternary(history):
 
 
 
-# def plot_samples(samples):
-#     """Layout: uma coluna por amostra, 5 linhas:
-
-#     1. Imagem original
-#     2. Gabarito com fronteira (3 cores: fundo, interior, fronteira)
-#     3. Predição com fronteira (3 cores: CNN argmax)
-#     4. Gabarito de instâncias (múltiplas cores, fundo preto)
-#     5. Predição de instâncias (múltiplas cores, fundo preto)
-
-#     Espera tuplas no formato: (count_err, img_np, gt_t, pred_t, gt_masks,
-#     pred_masks)
-#     """
-#     n_samples = len(samples)
-#     fig, axes = plt.subplots(
-#         5, n_samples, figsize=(4 * n_samples, 20), squeeze=False
-#     )
-#     fig.suptitle(
-#         f'Os {n_samples} piores resultados', fontsize=14, fontweight='bold'
-#     )
-
-#     # 3 cores para mapas ternários (0: fundo, 1: interior, 2: fronteira)
-#     cmap_ternary = ListedColormap(['#1a1a1a', '#2b83ba', '#d7191c'])
-
-#     # Paleta de instâncias (rótulo 0 mascarado em preto)
-#     cmap_inst = plt.get_cmap('prism').copy()
-#     cmap_inst.set_bad('black')
-
-#     for idx, (
-#         err,
-#         img,
-#         gt_ternary,
-#         pred_ternary,
-#         gt_masks,
-#         pred_masks,
-#     ) in enumerate(samples):
-#         H, W = img.shape[:2]
-
-#         # Conversão das instâncias para mapas de rótulos com fundo 0 mascarado
-#         gt_label = (
-#             masks_to_label(gt_masks, (H, W))
-#             if not (isinstance(gt_masks, np.ndarray) and gt_masks.ndim == 2)
-#             else gt_masks
-#         )
-#         pred_label = (
-#             masks_to_label(pred_masks, (H, W))
-#             if not (isinstance(pred_masks, np.ndarray) and pred_masks.ndim == 2)
-#             else pred_masks
-#         )
-
-#         gt_masked = np.ma.masked_where(gt_label == 0, gt_label)
-#         pred_masked = np.ma.masked_where(pred_label == 0, pred_label)
-
-#         # Linha 1: Imagem Original
-#         img_to_show = np.clip(img, 0, 1) if img.max() <= 1.0 else img
-#         axes[0, idx].imshow(img_to_show)
-#         axes[0, idx].set_title('Original')
-#         axes[0, idx].axis('off')
-
-#         # Linha 2: Gabarito com fronteira (3 cores)
-#         axes[1, idx].imshow(
-#             gt_ternary, cmap=cmap_ternary, vmin=0, vmax=2, interpolation='nearest'
-#         )
-#         axes[1, idx].set_title('Gabarito (Fronteira)')
-#         axes[1, idx].axis('off')
-
-#         # Linha 3: Predição com fronteira (3 cores)
-#         axes[2, idx].imshow(
-#             pred_ternary,
-#             cmap=cmap_ternary,
-#             vmin=0,
-#             vmax=2,
-#             interpolation='nearest',
-#         )
-#         axes[2, idx].set_title('Predição (Fronteira)')
-#         axes[2, idx].axis('off')
-
-#         # Linha 4: Gabarito colorido por instâncias
-#         n_gt = (
-#             len(gt_masks)
-#             if isinstance(gt_masks, list)
-#             else len(np.unique(gt_label[gt_label > 0]))
-#         )
-#         axes[3, idx].imshow(gt_masked, cmap=cmap_inst, interpolation='nearest')
-#         axes[3, idx].set_title(f'Gabarito (Instâncias: {n_gt})')
-#         axes[3, idx].axis('off')
-
-#         # Linha 5: Predição colorida por instâncias
-#         n_pred = (
-#             len(pred_masks)
-#             if isinstance(pred_masks, list)
-#             else len(np.unique(pred_label[pred_label > 0]))
-#         )
-#         err_str = f'{err:.3f}' if isinstance(err, float) else f'{err}'
-#         axes[4, idx].imshow(
-#             pred_masked, cmap=cmap_inst, interpolation='nearest'
-#         )
-#         axes[4, idx].set_title(
-#             f'Predição (Instâncias: {n_pred}) | Erro: {err_str}'
-#         )
-#         axes[4, idx].axis('off')
-
-#     # Legenda para as linhas 2 e 3 (classes ternárias)
-#     legend_elements = [
-#         mpatches.Patch(color='#1a1a1a', label='0: Fundo'),
-#         mpatches.Patch(color='#2b83ba', label='1: Interior'),
-#         mpatches.Patch(color='#d7191c', label='2: Fronteira'),
-#     ]
-#     fig.legend(
-#         handles=legend_elements,
-#         loc='lower center',
-#         ncol=3,
-#         bbox_to_anchor=(0.5, 0.005),
-#     )
-
-#     plt.tight_layout(rect=[0, 0.02, 1, 0.98])
-#     plt.show()
-
-
-
-
-
-
-
-import matplotlib.patches as mpatches
-import matplotlib.pyplot as plt
-import numpy as np
-from matplotlib.colors import ListedColormap
-
-
-def plot_samples(samples, batch_size=6):
+def plot_samples_ternary(samples, batch_size=6):
     """Layout: uma coluna por amostra, 5 linhas por figura.
 
     Gera uma figura separada a cada `batch_size` amostras (padrão: 6).
@@ -488,10 +359,10 @@ def plot_samples(samples, batch_size=6):
             ncol=3,
             bbox_to_anchor=(0.5, 0.005),
         )
-        fig.savefig(
-            f'samples_batch_{batch_num + 1}.png',
-            dpi=300,
-            bbox_inches='tight',
-        )
+        # fig.savefig(
+        #     f'samples_batch_{batch_num + 1}.png',
+        #     dpi=300,
+        #     bbox_inches='tight',
+        # )
         plt.tight_layout(rect=[0, 0.02, 1, 0.98])
         plt.show()
