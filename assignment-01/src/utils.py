@@ -9,15 +9,6 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'xpu' if hasattr(
 
 
 def plot_metrics(all_mAPs, all_count_errors, all_densities):
-    print(f"Média global mAP: {np.mean(all_mAPs):.4f}")
-    print(f"Média global Erro Absoluto de Contagem: {np.mean(all_count_errors):.4f}")
-
-    corr_ap = np.corrcoef(all_densities, all_mAPs)[0, 1]
-    print(f'Correlação (densidade x mAP por imagem): {corr_ap:.3f}')
-
-    corr_err = np.corrcoef(all_densities, all_count_errors)[0, 1]
-    print(f'Correlação (densidade x erro de contagem): {corr_err:.3f}')
-
     fig, ax = plt.subplots(1, 2, figsize=(10, 6))
 
     color = 'tab:blue'
