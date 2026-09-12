@@ -347,34 +347,77 @@ class ParseNetDDimensional(nn.Module):
 
 
 class UNetTernary(nn.Module):
-    def __init__(self):
+	def __init__(self):
+		super().__init__()
+		resnet = resnet34(weights=ResNet34_Weights.IMAGENET1K_V1)
+		
+		self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu)
+		self.pool = resnet.maxpool
+		self.enc2 = resnet.layer1
+		self.enc3 = resnet.layer2
+		self.enc4 = resnet.layer3
+
+		self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+		self.dec3 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=3, padding=1), nn.ReLU())
+		self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+		self.dec2 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
+		self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
+		self.dec1 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
+		self.up0 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+		self.dec0 = nn.Sequential(nn.Conv2d(32, 32, kernel_size=3, padding=1), nn.ReLU())
+		self.final_cls = nn.Conv2d(32, 3, kernel_size=1)
+		self.final_dist = nn.Sequential(nn.Conv2d(32, 1, kernel_size=1), nn.Sigmoid())
+
+	def forward(self, x):
+		x1 = self.enc1(x)
+		x2 = self.enc2(self.pool(x1))
+		x3 = self.enc3(x2)
+		x4 = self.enc4(x3)
+
+		d3 = self.dec3(torch.cat([self.up3(x4), x3], dim=1))
+		d2 = self.dec2(torch.cat([self.up2(d3), x2], dim=1))
+		d1 = self.dec1(torch.cat([self.up1(d2), x1], dim=1))
+		d0 = self.dec0(self.up0(d1))
+
+		logits_cls = self.final_cls(d0)
+		dist_pred = self.final_dist(d0)
+		return logits_cls, dist_pred
+
+
+class DeepLabResNet18(nn.Module):
+    """
+    Variante do DeepLab com ASPP utilizando estritamente o MESMO encoder (ResNet-18)
+    da UNetDDimensional, atendendo à exigência de controle de backbone do Eixo 1.
+    """
+    def __init__(self, D: int = 1):
         super().__init__()
         resnet = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-        
-        self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu)
-        self.pool = resnet.maxpool
-        self.enc2 = resnet.layer1
-        self.enc3 = resnet.layer2
-        self.enc4 = resnet.layer3
+        self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu)  # 64x64
+        self.pool = resnet.maxpool                                        # 32x32
+        self.enc2 = resnet.layer1                                         # 32x32, 64 canais
+        self.enc3 = resnet.layer2                                         # 16x16, 128 canais
+        self.enc4 = resnet.layer3                                         # 8x8, 256 canais
 
-        self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.dec3 = nn.Sequential(nn.Conv2d(256, 128, kernel_size=3, padding=1), nn.ReLU())
-        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.dec2 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
-        self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
-        self.dec1 = nn.Sequential(nn.Conv2d(128, 64, kernel_size=3, padding=1), nn.ReLU())
-        self.up0 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
-        self.segmentation_head = nn.Conv2d(32, 3, kernel_size=1) # 3 canais (Trilha A)
-        
-    def forward(self, x):
+        # ASPP adaptado aos 256 canais da ResNet-18
+        self.aspp = ASPP(in_channels=256, out_channels=128)
+        self.up_conv = nn.Sequential(
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=4),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=4),
+            nn.ReLU(),
+        )
+        self.semantic_head = nn.Conv2d(32, 1, kernel_size=1)
+        self.embed_head = nn.Conv2d(32, D, 1)
+
+    def forward(self, x: torch.Tensor):
         x1 = self.enc1(x)
         x2 = self.enc2(self.pool(x1))
         x3 = self.enc3(x2)
         x4 = self.enc4(x3)
 
-        d3 = self.dec3(torch.cat([self.up3(x4), x3], dim=1))
-        d2 = self.dec2(torch.cat([self.up2(d3), x2], dim=1))
-        d1 = self.dec1(torch.cat([self.up1(d2), x1], dim=1))
-        d0 = self.up0(d1)
-        
-        return self.segmentation_head(d0)
+        x_aspp = self.aspp(x4)
+        d0 = self.up_conv(x_aspp)
+        return self.semantic_head(d0), self.embed_head(d0)
+
+
+

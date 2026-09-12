@@ -107,8 +107,8 @@ def combined_loss(logits, targets, pred_dist, targets_dist,
 # ==============================================================================
 # 4. TREINAMENTO COM HISTÓRICO
 # ==============================================================================
-def train_model_ternary(model,train_loader,val_loader,
-		class_weights, label, epochs=20,lr=1e-3,dist_weight=1.0):
+def train_model_ternary(model,train_loader,val_loader, 
+						label=None, epochs=10,lr=1e-3,dist_weight=1.0):
 	optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 	scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
 			optimizer, mode='min', factor=0.5, patience=2
@@ -121,6 +121,7 @@ def train_model_ternary(model,train_loader,val_loader,
 	}
 	best_val_loss = float('inf')
 
+	class_weights = torch.tensor([1.0, 1.0, 2.0])
 	class_weights = class_weights.to(DEVICE)
 
 	for epoch in range(epochs):
@@ -136,7 +137,7 @@ def train_model_ternary(model,train_loader,val_loader,
 			logits_cls, dist_pred = model(images)
 			loss, _, _ = combined_loss(
 			logits_cls, labels, dist_pred, dists, class_weights,
-			use_focal=False, # <-- Altere para False
+			use_focal=False,
 			dist_weight=dist_weight
 		)
 			loss.backward()
@@ -184,8 +185,9 @@ def train_model_ternary(model,train_loader,val_loader,
 				f' Loss: {val_loss:.4f} (Cls: {val_cls:.4f}, Dist: {val_dist:.4f})'
 		)
 
-		if val_loss < best_val_loss:
-			best_val_loss = val_loss
-			torch.save(model.state_dict(), '../models/best_model_{label}.pt')
+		if label != None:
+			if val_loss < best_val_loss:
+				best_val_loss = val_loss
+				torch.save(model.state_dict(), f'../models/best_model_{label}.pt')
 
 	return history

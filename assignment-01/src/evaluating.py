@@ -184,7 +184,7 @@ def decode_watershed(
 
 
 @torch.no_grad()
-def evaluate_instances_watershed(
+def evaluate_instances_ternary(
 		model,
 		loader,
 		interior_thresh=0.55,

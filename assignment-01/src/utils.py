@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from evaluating import decode_watershed
+from .evaluating import decode_watershed
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'xpu' if hasattr(torch, 'xpu') and torch.xpu.is_available() else 'cpu')
 
@@ -235,80 +235,80 @@ def plot_training_curves_ternary(history):
 
 
 
-def plot_metrics(all_mAPs, all_count_errors, all_densities):
-    fig, ax = plt.subplots(1, 2, figsize=(10, 6))
+# def plot_metrics(all_mAPs, all_count_errors, all_densities):
+#     fig, ax = plt.subplots(1, 2, figsize=(10, 6))
 
-    color = 'tab:blue'
-    ax[0].set_xlabel('Densidade de Objetos (Qtd. de Instâncias Reais)')
-    ax[0].set_ylabel('mAP (Threshold 0.5 a 0.95)', color=color)
-    ax[0].scatter(all_densities, all_mAPs, color=color, alpha=0.6, label='mAP')
-    ax[0].tick_params(axis='y', labelcolor=color)
-    ax[0].spines['right'].set_visible(False)
-    ax[0].spines['top'].set_visible(False)
-    ax[0].set_title("Quantificação de Falhas: Desempenho vs. Densidade", fontsize=10, fontweight='bold')
+#     color = 'tab:blue'
+#     ax[0].set_xlabel('Densidade de Objetos (Qtd. de Instâncias Reais)')
+#     ax[0].set_ylabel('mAP (Threshold 0.5 a 0.95)', color=color)
+#     ax[0].scatter(all_densities, all_mAPs, color=color, alpha=0.6, label='mAP')
+#     ax[0].tick_params(axis='y', labelcolor=color)
+#     ax[0].spines['right'].set_visible(False)
+#     ax[0].spines['top'].set_visible(False)
+#     ax[0].set_title("Quantificação de Falhas: Desempenho vs. Densidade", fontsize=10, fontweight='bold')
 
-    color = 'tab:red'
-    ax[1].set_ylabel('Erro Absoluto de Contagem', color=color)
-    ax[1].scatter(all_densities, all_count_errors, color=color, alpha=0.6, label='Erro de Contagem')
-    ax[1].set_xlabel('Densidade de Objetos (Qtd. de Instâncias Reais)')
-    ax[1].tick_params(axis='y', labelcolor=color)
-    ax[1].spines['right'].set_visible(False)
-    ax[1].spines['top'].set_visible(False)
-    ax[1].set_title("Quantificação de Falhas: Desempenho vs. Densidade", fontsize=10, fontweight='bold')
-    plt.grid(False)
-    fig.tight_layout()
-    plt.show()
+#     color = 'tab:red'
+#     ax[1].set_ylabel('Erro Absoluto de Contagem', color=color)
+#     ax[1].scatter(all_densities, all_count_errors, color=color, alpha=0.6, label='Erro de Contagem')
+#     ax[1].set_xlabel('Densidade de Objetos (Qtd. de Instâncias Reais)')
+#     ax[1].tick_params(axis='y', labelcolor=color)
+#     ax[1].spines['right'].set_visible(False)
+#     ax[1].spines['top'].set_visible(False)
+#     ax[1].set_title("Quantificação de Falhas: Desempenho vs. Densidade", fontsize=10, fontweight='bold')
+#     plt.grid(False)
+#     fig.tight_layout()
+#     plt.show()
 
 
-def masks_to_label(masks, shape):
-    """
-    Converte uma LISTA de máscaras binárias (formato usado por
-    evaluate_instances/greedy_match) num único MAPA DE RÓTULOS (H,W),
-    formato que cmap='nipy_spectral' espera pra colorir por instância:
-    0 = fundo, 1 = instância 1, 2 = instância 2, ...
+# def masks_to_label(masks, shape):
+#     """
+#     Converte uma LISTA de máscaras binárias (formato usado por
+#     evaluate_instances/greedy_match) num único MAPA DE RÓTULOS (H,W),
+#     formato que cmap='nipy_spectral' espera pra colorir por instância:
+#     0 = fundo, 1 = instância 1, 2 = instância 2, ...
  
-    Se duas máscaras se sobrepuserem (não deveria acontecer com
-    componentes conexos, mas por segurança), a última da lista "ganha"
-    o pixel disputado.
-    """
-    label = np.zeros(shape, dtype=np.int32)
-    for i, m in enumerate(masks, start=1):
-        label[m.astype(bool)] = i
-    return label
+#     Se duas máscaras se sobrepuserem (não deveria acontecer com
+#     componentes conexos, mas por segurança), a última da lista "ganha"
+#     o pixel disputado.
+#     """
+#     label = np.zeros(shape, dtype=np.int32)
+#     for i, m in enumerate(masks, start=1):
+#         label[m.astype(bool)] = i
+#     return label
 
     
-def plot_samples(samples, part: int = 1):
-    """
-    Layout: uma coluna por amostra, 3 linhas (original / gabarito / predição),
-    cada instância com uma cor distinta via nipy_spectral (fundo forçado a
-    preto com máscara, pra não ficar colorido também).
-    """
-    n_samples = len(samples)
-    fig, axes = plt.subplots(3, n_samples, figsize=(4 * n_samples, 12), squeeze=False)
-    fig.suptitle(f"Amostra de {n_samples} Resultados - Parte {part}", fontsize=14, fontweight='bold')
+# def plot_samples(samples, part: int = 1):
+#     """
+#     Layout: uma coluna por amostra, 3 linhas (original / gabarito / predição),
+#     cada instância com uma cor distinta via nipy_spectral (fundo forçado a
+#     preto com máscara, pra não ficar colorido também).
+#     """
+#     n_samples = len(samples)
+#     fig, axes = plt.subplots(3, n_samples, figsize=(4 * n_samples, 12), squeeze=False)
+#     fig.suptitle(f"Amostra de {n_samples} Resultados - Parte {part}", fontsize=14, fontweight='bold')
  
-    cmap = plt.get_cmap('prism').copy()
-    cmap.set_bad('black')  # fundo (rótulo 0, mascarado) sempre preto
+#     cmap = plt.get_cmap('prism').copy()
+#     cmap.set_bad('black')  # fundo (rótulo 0, mascarado) sempre preto
  
-    for idx, (err, img, gt_masks, pred_masks) in enumerate(samples):
-        H, W = img.shape[:2]
-        gt_label = masks_to_label(gt_masks, (H, W))
-        pred_label = masks_to_label(pred_masks, (H, W))
+#     for idx, (err, img, gt_masks, pred_masks) in enumerate(samples):
+#         H, W = img.shape[:2]
+#         gt_label = masks_to_label(gt_masks, (H, W))
+#         pred_label = masks_to_label(pred_masks, (H, W))
  
-        gt_masked = np.ma.masked_where(gt_label == 0, gt_label)
-        pred_masked = np.ma.masked_where(pred_label == 0, pred_label)
+#         gt_masked = np.ma.masked_where(gt_label == 0, gt_label)
+#         pred_masked = np.ma.masked_where(pred_label == 0, pred_label)
 
-        axes[0, idx].imshow(img)
-        axes[0, idx].set_title("Original")
-        axes[0, idx].axis('off')
+#         axes[0, idx].imshow(img)
+#         axes[0, idx].set_title("Original")
+#         axes[0, idx].axis('off')
 
-        axes[1, idx].imshow(gt_masked, cmap=cmap, interpolation='nearest')
-        axes[1, idx].set_title(f"Gabarito (Instâncias: {len(gt_masks)})")
-        axes[1, idx].axis('off')
+#         axes[1, idx].imshow(gt_masked, cmap=cmap, interpolation='nearest')
+#         axes[1, idx].set_title(f"Gabarito (Instâncias: {len(gt_masks)})")
+#         axes[1, idx].axis('off')
  
-        axes[2, idx].imshow(pred_masked, cmap=cmap, interpolation='nearest')
-        axes[2, idx].set_title(f"Predição (Instâncias: {len(pred_masks)}) | Erro: {err}")
-        axes[2, idx].axis('off')
+#         axes[2, idx].imshow(pred_masked, cmap=cmap, interpolation='nearest')
+#         axes[2, idx].set_title(f"Predição (Instâncias: {len(pred_masks)}) | Erro: {err}")
+#         axes[2, idx].axis('off')
  
-    plt.tight_layout()
-    plt.show()
+#     plt.tight_layout()
+#     plt.show()

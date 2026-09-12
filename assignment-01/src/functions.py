@@ -4,226 +4,258 @@ import numpy as np
 import cv2 as cv
 from sklearn.cluster import DBSCAN
 from .models import   ParseNetDDimensional, PSPNetDDimensional, UNetTernary
-
-def calculate_instance_metrics(true_instances, pred_instances):
-    true_ids = np.unique(true_instances)[1:] # Remove the background label (0)
-    pred_ids = np.unique(pred_instances)[1:] # Remove the background label (0)
-
-    # Absolute count error
-    num_true_objects = len(true_ids)
-    num_pred_objects = len(pred_ids)
-    count_error = abs(num_pred_objects - num_true_objects)
-
-    # Extreme cases: no objects in either true or predicted masks
-    if num_true_objects == 0 and num_pred_objects == 0:
-        return 1.0, count_error, num_true_objects
-    if num_true_objects == 0 or num_pred_objects == 0:
-        return 0.0, count_error, num_true_objects
-
-    # IoU Matrix Calculation
-    iou_matrix = np.zeros((num_true_objects, num_pred_objects))
-    for i, t_id in enumerate(true_ids):
-        t_mask = (true_instances == t_id)
-        for j, p_id in enumerate(pred_ids):
-            p_mask = (pred_instances == p_id)
-            intersection = np.logical_and(t_mask, p_mask).sum()
-            if intersection > 0:
-                union = np.logical_or(t_mask, p_mask).sum()
-                iou_matrix[i, j] = intersection / union
-    sorted_indices = np.argsort( iou_matrix.flatten())[::-1]
-    shape = iou_matrix.shape
-
-    #  Calculate Average Precision 
-    aps = []
-    for t in np.arange(0.5, 1.0, 0.05):
-        tp = 0
-        matched_true = set()
-        matched_pred = set()
-        for idx in sorted_indices:
-            t_idx, p_idx = np.unravel_index(idx, shape)
-            iou = iou_matrix[t_idx, p_idx]
-            if iou < t:
-                break
-            if t_idx not in matched_true and p_idx not in matched_pred:
-                tp += 1 # só os diferentes
-                matched_true.add(t_idx)
-                matched_pred.add(p_idx)
-                
-        fp = num_pred_objects - tp
-        fn = num_true_objects - tp
-        ap = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0.0
-        aps.append(ap)
-        
-    mAP = np.mean(aps)
-    
-    return mAP, count_error, num_true_objects
+from .training import train_model_ternary
+from .evaluating import evaluate_instances_ternary
 
 
-def embeddings_to_instances(pred_bin, pred_emb, eps =1.0, min_samples = 5):
-    mask = (torch.sigmoid(pred_bin[0])>0.5).cpu().numpy()
-    pred_instances = np.zeros(mask.shape, dtype=np.int32)
-    if not mask.any():
-        return pred_instances
-
-    emb_foreground = (pred_emb[:, mask].T).cpu().numpy()
-    
-    model = DBSCAN(eps= eps, min_samples= min_samples)
-    labels = model.fit_predict(emb_foreground) + 1
-    pred_instances[mask]= labels
-
-    return pred_instances
 
 
-def train_model(model, dataloader, device, part: int, lr: float = 1e-3, num_epochs: int = 5):
-    model.to(device)
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    num_batchs = len(dataloader)
-
-    for epoch in range(num_epochs):
-        model.train()
-        accumulated_loss = 0.0
-        total_intersection = 0.0
-        total_union = 0.0
-        
-        for images, masks, instance_gt in dataloader:
-            images = images.to(device)
-            masks = masks.to(device)
-
-            if part == 1:
-                optimizer.zero_grad()
-                prediction_bin = model(images)
-                loss = criterion(prediction_bin, masks)
-            elif part == 2:
-                instance_gt = instance_gt.to(device)
-                optimizer.zero_grad()
-                prediction_bin, prediction_emb = model(images)
-                loss_bin = criterion(prediction_bin, masks)
-                loss_emb = discrimative_loss(prediction_emb, instance_gt)
-                loss = loss_bin + loss_emb
-            loss.backward()
-            optimizer.step()
-
-            binary_prediction = (torch.sigmoid(prediction_bin) > 0.5).float()
-            intersection = (binary_prediction * masks).sum()
-            union = binary_prediction.sum() + masks.sum() - intersection
-            
-            accumulated_loss += loss.item()
-            total_intersection += intersection.item()
-            total_union += union.item()
-            
-        epoch_iou = total_intersection / (total_union + 1e-6)
-        epoch_dice = (2.0 * total_intersection) / (total_union + total_intersection + 1e-6)
-        print(f"Epoch {epoch+1}/{num_epochs} | Loss: {accumulated_loss/num_batchs:.4f} | IoU: {epoch_iou:.4f} | Dice: {epoch_dice:.4f}")
 
 
-def evaluate(model, dataloader, device, part: int, k_samples: int = 4):
-    model.eval()
-    all_mAPs = []
-    all_count_errors = []
-    all_densities = []
-    samples = []
 
-    for images, _, real_instances in dataloader:
-        with torch.no_grad():
-            if part == 1:
-                binary_preds = (torch.sigmoid(model(images.to(device))) > 0.5).float().cpu().numpy()
-            elif part == 2:
-                binary_preds, embed_preds = model(images.to(device))    
-        real_instances_np = real_instances.numpy()
 
-        for i in range(images.size(0)):
-            if part == 1:
-                pred_instances = np.squeeze(binary_preds[i, 0])
-                pred_instances = cv.connectedComponents(pred_instances.astype(np.uint8))[1]
-            elif part == 2:
-                pred_instances = embeddings_to_instances(binary_preds[i], embed_preds[i])
-                
-            mAP, count_error, density = calculate_instance_metrics(
-                real_instances_np[i],
-                pred_instances
+import os
+import random
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torchvision.models import resnet18, ResNet18_Weights
+
+# Importações dos módulos do projeto
+from models import (
+    ASPP,
+    UNetDDimensional,
+    PSPNetDDimensional,
+    ParseNetDDimensional,
+    SegNetDDimensional,
+    DeepLabDDimensional,
+    DeepLabResNet18
+)
+from training import train_model_binary, compute_iou_dice
+from evaluating import evaluate_instances_binary
+
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+def set_seed(seed: int = 42):
+    """Garante reprodutibilidade estrita entre execuções."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+class ModelBinaryWrapper(nn.Module):
+    """
+    Garante que modelos que retornam tuplas (ex: semantic_head, embed_head)
+    forneçam apenas os logits de canal único (B, 1, H, W) esperados
+    pelas rotinas train_model_binary e evaluate_instances_binary.
+    """
+    def __init__(self, base_model: nn.Module):
+        super().__init__()
+        self.base_model = base_model
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.base_model(x)
+        if isinstance(out, (tuple, list)):
+            return out[0]
+        return out
+
+
+def get_ablation_models() -> dict:
+    """
+    Mapeamento de modelos para os Eixos 1 e 3.
+    Todos os modelos baseados em ResNet compartilham o encoder ResNet-18.
+    """
+    return {
+        # Eixo 1: Mecanismos de recuperação de resolução (mesmo encoder ResNet-18)
+        "Eixo1_SkipConnections (U-Net)": lambda: UNetDDimensional(D=1),
+        "Eixo1_ASPP (DeepLab)": lambda: DeepLabResNet18(D=1),
+        "Eixo1_PoolIndices (SegNet)": lambda: SegNetDDimensional(D=1),
+
+        # Eixo 3: Contexto global acoplado ao decoder
+        # A U-Net serve de baseline (sem pooling global adicional)
+        "Eixo3_Baseline (Sem Contexto)": lambda: UNetDDimensional(D=1),
+        "Eixo3_ImagePooling (ParseNet)": lambda: ParseNetDDimensional(D=1),
+        "Eixo3_PyramidPooling (PSPNet)": lambda: PSPNetDDimensional(D=1),
+    }
+
+
+def ablation(
+    train_dataset,
+    val_dataset,
+    configs: dict = None,
+    seeds: list = [42, 123],
+    epochs: int = 10,
+    batch_size: int = 16,
+    lr: float = 1e-4,
+    save_dir: str = "../models",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Executa o protocolo experimental de ablações reportando média ± desvio.
+
+    Parâmetros:
+        train_dataset: Dataset de treino (formato binário).
+        val_dataset: Dataset de validação (com instâncias para matching).
+        configs: Dicionário {nome_config: factory_function_modelo}.
+                 Se None, executa as arquiteturas padrão dos Eixos 1 e 3.
+        seeds: Lista com 2 seeds para execução estocástica.
+        epochs: Número de épocas de treinamento por seed.
+        batch_size: Tamanho do mini-batch.
+        lr: Taxa de aprendizado.
+        save_dir: Diretório para salvar pesos checkpoints.
+
+    Retorna:
+        df_summary: Tabela agregada com métricas no formato 'média ± desvio'.
+        df_runs: Tabela discriminada contendo os valores brutos de cada seed.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    if configs is None:
+        configs = get_ablation_models()
+
+    from dataset import collate_fn_binary
+    raw_results = []
+
+    for name, model_fn in configs.items():
+        print(f"\n{'='*70}\nIniciando Configuração: {name}\n{'='*70}")
+
+        for seed in seeds:
+            print(f"--> Executando Seed {seed}...")
+            set_seed(seed)
+
+            # DataLoaders com gerador determinístico
+            g = torch.Generator()
+            g.manual_seed(seed)
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                collate_fn=collate_fn_binary,
+                generator=g,
             )
-            
-            all_mAPs.append(mAP)
-            all_count_errors.append(count_error)
-            all_densities.append(density)
-            
-            # Transpor imagem (C, H, W) para (H, W, C) para o matplotlib
-            img_plot = images[i].cpu().numpy().transpose(1, 2, 0)
-            samples.append((count_error, img_plot, real_instances_np[i], pred_instances))
-            
-    if len(samples) > k_samples:
-        index = np.random.choice(len(samples), size=k_samples, replace=False)
-        samples = [samples[i] for i in index]
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                collate_fn=collate_fn_binary,
+            )
+
+            # Instanciação e envelopamento para compatibilidade
+            model = ModelBinaryWrapper(model_fn()).to(DEVICE)
+            model_label = f"ablation_{name.replace(' ', '_').replace('/', '_')}_seed{seed}"
+
+            # 1. Treinamento
+            history = train_model_binary(
+                model=model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                label=model_label,
+                epochs=epochs,
+                lr=lr,
+            )
+
+            # Carrega o melhor checkpoint salvo durante o treino
+            ckpt_path = os.path.join(save_dir, f"best_model_{model_label}.pt")
+            if os.path.exists(ckpt_path):
+                model.load_state_dict(torch.load(ckpt_path, weights_only=True))
+
+            # 2. Avaliação de Métricas Semânticas (Nível de Pixel)
+            model.eval()
+            total_iou = torch.tensor(0.0, device=DEVICE)
+            total_dice = torch.tensor(0.0, device=DEVICE)
+            with torch.no_grad():
+                for images, masks, _, _ in val_loader:
+                    images = images.to(DEVICE)
+                    masks = masks.to(DEVICE)
+                    logits = model(images)
+                    b_iou, b_dice = compute_iou_dice(logits, masks)
+                    total_iou += b_iou
+                    total_dice += b_dice
+
+            val_iou = (total_iou / len(val_dataset)).item() * 100.0
+            val_dice = (total_dice / len(val_dataset)).item() * 100.0
+
+            # 3. Avaliação de Instâncias (mAP e Erro de Contagem)
+            aps, count_errors, _, per_image_aps, _ = evaluate_instances_binary(
+                model=model,
+                loader=val_loader,
+                prob_threshold=0.5,
+                min_size=5,
+            )
+
+            mAP = float(np.mean(aps))
+            ap_50 = float(aps[0])
+            ap_75 = float(aps[5]) if len(aps) > 5 else float(aps[-1])
+            mean_count_err = float(np.mean(count_errors))
+
+            raw_results.append({
+                "Configuração": name,
+                "Seed": seed,
+                "Val IoU (%)": val_iou,
+                "Val Dice (%)": val_dice,
+                "mAP [0.5:0.95]": mAP,
+                "AP@50": ap_50,
+                "AP@75": ap_75,
+                "Erro Contagem": mean_count_err,
+            })
+
+    df_runs = pd.DataFrame(raw_results)
+
+    # 4. Agregação em Média ± Desvio Padrão
+    numeric_cols = [
+        "Val IoU (%)", "Val Dice (%)",
+        "mAP [0.5:0.95]", "AP@50", "AP@75", "Erro Contagem"
+    ]
+    grouped = df_runs.groupby("Configuração")
+
+    summary_rows = []
+    for name, group in grouped:
+        row = {"Configuração": name}
+        for col in numeric_cols:
+            mean = group[col].mean()
+            std = group[col].std(ddof=1) if len(group) > 1 else 0.0
+            fmt = f"{mean:.2f} ± {std:.2f}" if "IoU" in col or "Dice" in col or "Contagem" in col else f"{mean:.4f} ± {std:.4f}"
+            row[col] = fmt
+        summary_rows.append(row)
+
+    df_summary = pd.DataFrame(summary_rows).set_index("Configuração")
+    return df_summary, df_runs
+
+
+
+# def ablation(dataloader_train, dataloader_val, device, axis, seeds: list[int] = [42, 100]):
     
-    return all_mAPs, all_count_errors, all_densities, samples
+#     architectures = {
+#             "Parse": ParseNetDDimensional,
+#             "UNeT": UNetTernary,
+#             "PSP": PSPNetDDimensional
+#         }
 
-
-def discrimative_loss(prediction, instance, delta_d=1.5):
-    batch_size = prediction.size(0)
-    total_loss = prediction.sum() * 0.0 
-    
-    for b in range(batch_size):
-        pred_b = prediction[b] # [C, H, W]
-        inst_b = instance[b]   # [H, W]
-        objects_ids = torch.unique(inst_b)[1:] 
-        var_loss = 0.0
-        dist_loss = 0.0
-        reg_loss = 0.0
-        centroids = []
-
-        for obj_id in objects_ids:
-            mask = (inst_b == obj_id)
-            pixels = pred_b[:, mask] 
-            
-            avg = torch.mean(pixels, dim=1)
-            var = torch.mean(torch.norm(pixels - avg.unsqueeze(1), dim=0))
-            var_loss += var
-            reg_loss += torch.norm(avg)
-            centroids.append(avg)
-            
-        num_centroids = len(centroids)
-        if num_centroids == 0: 
-            continue
-            
-        if num_centroids > 1:
-            centroids_tensor = torch.stack(centroids) 
-            dists = torch.cdist(centroids_tensor, centroids_tensor, p=2.0)
-            triu_idx = torch.triu_indices(num_centroids, num_centroids, offset=1)
-            pairwise_dists = dists[triu_idx[0], triu_idx[1]]
-            dist_loss = torch.clamp(delta_d - pairwise_dists, min=0).sum()
-        loss_emb = (reg_loss + dist_loss + var_loss) / num_centroids
-        total_loss += loss_emb
-        
-    return total_loss / batch_size
-
-
-def ablation(dataloader_train, dataloader_val, device, axis, seeds: list[int] = [42, 100]):
-    
-    architectures = {
-         
-                  "UNeT": UNetTernary
-        }
-
-    maP_result_comb = {}
+#     maP_result_comb_1 = {}
+#     maP_result_comb_2 = {}
    
-    for name, model_class in architectures.items():
-        mAP_results = []
-        for current_seed in seeds:
-            print(f"Avaliando Arquitetura: {name} com seed {current_seed}")
-            torch.manual_seed(current_seed)
-            np.random.seed(current_seed)
-            model = model_class().to(device)
-            train_model(model, dataloader_train, device, part=2, num_epochs=10)
-            all_mAPs = evaluate(model, dataloader_val, device, part=2)[0]
-            mAP_results.append(np.mean(all_mAPs))
-        mean_map = np.mean(mAP_results)
-        std_map = np.std(mAP_results)
-        maP_result_comb[name] = (mean_map,std_map )
+#     for name, model_class in architectures.items():
+#         mAP_results_1 = []
+#         mAP_results_2 = []
+#         for current_seed in seeds:
+#             print(f"Avaliando Arquitetura: {name} com seed {current_seed}")
+#             torch.manual_seed(current_seed)
+#             np.random.seed(current_seed)
+#             model = model_class().to(device)
+#             train_model_ternary(model, dataloader_train, dataloader_val)
+#             aps, _, _, per_image_aps, _ = evaluate_instances_ternary(model, dataloader_val, device, part=2)
+#             mAP_results_1.append(np.mean(aps))
+#             mAP_results_2.append(np.mean(per_image_aps))
+#         maP_result_comb_1[name] = (np.mean(mAP_results_1), np.std(mAP_results_1))
+#         maP_result_comb_2[name] = (np.mean(mAP_results_2), np.std(mAP_results_2))
     
-
-        print(f"\n[Eixo {axis}] Resultado Final: mAP = {mean_map:.4f} ± {std_map:.4f}")
-    return maP_result_comb
+#     return maP_result_comb_1, maP_result_comb_2 
 
 def create_mosaic_real(dataset, indices=[0, 1, 2, 3]):
     """
