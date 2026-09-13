@@ -9,6 +9,7 @@ from .training import train_model_ternary
 from .evaluating import evaluate_instances_ternary, decode_watershed
 from .models import UNetTernary, DeepLabTernary, SegNetTernary, ParseNetTernary, PSPNetTernary
 import cv2 as cv
+import torch.nn.functional as F
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'xpu' if hasattr(torch, 'xpu') and torch.xpu.is_available() else 'cpu')
 IOU_THRESHOLDS = np.arange(0.50, 1.00, 0.05)
