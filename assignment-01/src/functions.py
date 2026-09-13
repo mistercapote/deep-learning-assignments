@@ -6,10 +6,12 @@ import torch
 from torch.utils.data import DataLoader
 from .dataset import collate_fn_ternary
 from .training import train_model_ternary
-from .evaluating import evaluate_instances_ternary
+from .evaluating import evaluate_instances_ternary, decode_watershed
 from .models import UNetTernary, DeepLabTernary, SegNetTernary, ParseNetTernary, PSPNetTernary
+import cv2 as cv
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'xpu' if hasattr(torch, 'xpu') and torch.xpu.is_available() else 'cpu')
+IOU_THRESHOLDS = np.arange(0.50, 1.00, 0.05)
 
 
 def set_seed(seed: int = 42):
@@ -162,3 +164,239 @@ def ablation(
 
     df_summary = pd.DataFrame(summary_rows).set_index("Configuração")
     return df_summary, df_runs
+
+
+def apply_corruption(images, corruption, intensity):
+    images_np = images.detach().cpu().numpy()
+
+    corrupted = []
+
+    for img in images_np:
+
+        # C,H,W -> H,W,C
+        img = np.transpose(img, (1, 2, 0))
+
+        if corruption == "blur":
+
+            kernels = {
+                1: 3,
+                2: 7,
+                3: 11
+            }
+
+            k = kernels[intensity]
+
+            img_corrupted = cv.GaussianBlur(
+                img,
+                (k, k),
+                0
+            )
+
+        elif corruption == "noise":
+
+            stds = {
+                1: 0.03,
+                2: 0.08,
+                3: 0.15
+            }
+
+            noise = np.random.normal(
+                0,
+                stds[intensity],
+                img.shape
+            )
+
+            img_corrupted = img + noise
+
+        elif corruption == "brightness_contrast":
+
+            factors = {
+                1: (1.10, 0.05),
+                2: (1.25, 0.10),
+                3: (1.40, 0.15)
+            }
+
+            contrast, brightness = factors[intensity]
+
+            img_corrupted = (
+                img * contrast + brightness
+            )
+
+        else:
+            raise ValueError(
+                f"Corrupção desconhecida: {corruption}"
+            )
+
+        img_corrupted = np.clip(
+            img_corrupted,
+            0,
+            1
+        )
+
+        # H,W,C -> C,H,W
+        corrupted.append(
+            np.transpose(
+                img_corrupted,
+                (2, 0, 1)
+            )
+        )
+
+    return torch.tensor(
+        np.stack(corrupted),
+        dtype=images.dtype
+    )
+
+
+
+@torch.no_grad()
+def evaluate_corrupted(
+    model,
+    dataloader,
+    device,
+    corruption,
+    intensity
+):
+    model.eval()
+
+    n_thresholds = len(IOU_THRESHOLDS)
+    tp_total = np.zeros(n_thresholds)
+    denom_total = np.zeros(n_thresholds)
+
+    count_errors = []
+
+    for images, _, _, instance_masks_batch, _ in dataloader:
+
+        # Aplica a corrupção
+        corrupted_images = apply_corruption(
+            images,
+            corruption,
+            intensity
+        ).to(device)
+
+        # Predição do modelo ternário
+        logits_cls, dist_pred = model(corrupted_images)
+
+        probs_batch = (
+            F.softmax(logits_cls, dim=1)
+            .cpu()
+            .numpy()
+        )
+
+        dists_batch = (
+            dist_pred.squeeze(1)
+            .cpu()
+            .numpy()
+        )
+
+        # Avalia cada imagem do batch
+        for b in range(corrupted_images.size(0)):
+
+            pred_masks = decode_watershed(
+                probs_batch[b],
+                dists_batch[b],
+                interior_thresh=0.55,
+                fg_thresh=0.5,
+                min_marker_size=5
+            )
+
+            gt_masks = instance_masks_batch[b]
+
+            n_pred = len(pred_masks)
+            n_gt = len(gt_masks)
+
+            # Erro na contagem
+            count_errors.append(
+                abs(n_pred - n_gt)
+            )
+
+            # Caso não haja objetos
+            if n_pred == 0 and n_gt == 0:
+                continue
+
+            if n_pred == 0 or n_gt == 0:
+                denom_total += n_pred + n_gt
+                continue
+
+            # Máscaras achatadas
+            pred_flat = np.array(
+                pred_masks,
+                dtype=np.int32
+            ).reshape(n_pred, -1)
+
+            gt_flat = np.array(
+                gt_masks,
+                dtype=np.int32
+            ).reshape(n_gt, -1)
+
+            # Interseção
+            inter = np.dot(
+                pred_flat,
+                gt_flat.T
+            )
+
+            # Áreas
+            area_pred = pred_flat.sum(axis=1)[:, np.newaxis]
+            area_gt = gt_flat.sum(axis=1)[np.newaxis, :]
+
+            # União
+            union = area_pred + area_gt - inter
+
+            # IoU
+            iou_matrix = inter / np.maximum(
+                union,
+                1e-6
+            )
+
+            # Possíveis pares
+            pairs = [
+                (iou_matrix[i, j], i, j)
+                for i in range(n_pred)
+                for j in range(n_gt)
+                if iou_matrix[i, j] > 0
+            ]
+
+            pairs.sort(
+                key=lambda x: -x[0]
+            )
+
+            # Avalia em cada threshold de IoU
+            for k, threshold in enumerate(IOU_THRESHOLDS):
+
+                matched_pred = set()
+                matched_gt = set()
+
+                tp = 0
+
+                for iou, i, j in pairs:
+
+                    if iou < threshold:
+                        break
+
+                    if (
+                        i not in matched_pred
+                        and j not in matched_gt
+                    ):
+                        matched_pred.add(i)
+                        matched_gt.add(j)
+                        tp += 1
+
+                fp = n_pred - tp
+                fn = n_gt - tp
+
+                tp_total[k] += tp
+                denom_total[k] += tp + fp + fn
+
+    # AP para cada threshold
+    aps = np.where(
+        denom_total > 0,
+        tp_total / denom_total,
+        1.0
+    )
+
+    # mAP
+    mAP = np.mean(aps)
+
+    # Erro médio de contagem
+    count_error = np.mean(count_errors)
+
+    return mAP, count_error
