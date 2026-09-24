@@ -1,11 +1,12 @@
 import numpy as np
 import pandas as pd
 import cv2 as cv
-import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.pyplot as plt
+from .metrics import calcular_iou
+from scipy.optimize import linear_sum_assignment
 
 SEED = 42
-
 
 def inicializar_objetos(num_objetos, velocidade_tipica,dur_oclusao,  img_size=128, seed=42):
     rng = np.random.default_rng(seed)
@@ -36,6 +37,8 @@ def inicializar_objetos(num_objetos, velocidade_tipica,dur_oclusao,  img_size=12
         objetos.append(obj)
         
     return objetos
+
+
 def gerador(num_objetos=8,
             velocidade_tipica=2.0,
             dur_oclusao=10,
@@ -92,31 +95,84 @@ def gerador(num_objetos=8,
     # FORA DO LOOP 1 (de quadros): Retorna todos os 45 quadros acumulados
     return video_frames, ground_truth
 
+class IoUTracker:
+    def __init__(self, iou_threshold=0.3, max_lost=3):
+        self.iou_threshold = iou_threshold
+        self.max_lost = max_lost
+        self.next_id = 1
+        self.tracks = {}  # {track_id: {'box': [x, y, w, h], 'lost': count}}
 
-
-
-
-
-def visualizar_trajetoria(video_frames, inicio=0, fim=25, passo=2):
-    # Garante que não passamos do tamanho total da lista de quadros
-    fim_real = min(fim, len(video_frames))
-    quadros_para_mostrar = list(range(inicio, fim_real, passo))
-    num_quadros = len(quadros_para_mostrar)
-
-    if num_quadros == 0:
-        print("Nenhum quadro válido no intervalo especificado.")
-        return
-
-    fig, axes = plt.subplots(1, num_quadros, figsize=(3 * num_quadros, 3))
-    
-    # Se houver apenas 1 quadro, axes não é um array/lista, então convertemos
-    if num_quadros == 1:
-        axes = [axes]
-
-    for idx, frame_idx in enumerate(quadros_para_mostrar):
-        axes[idx].imshow(video_frames[frame_idx])
-        axes[idx].set_title(f"Quadro {frame_idx + 1}")
-        axes[idx].axis('off')
+    def update(self, frame_idx, detections):
+        """
+        detections: lista de caixas no formato [x, y, w, h, conf]
+        retorna: lista no formato MOT [frame_idx, track_id, x, y, w, h, conf]
+        """
+        results = []
+        det_boxes = [d[:4] for d in detections]
         
-    plt.tight_layout()
-    plt.show()
+        # Se não há pistas ativas, inicializa todas as detecções como novas pistas
+        if len(self.tracks) == 0:
+            for d in detections:
+                self.tracks[self.next_id] = {'box': d[:4], 'lost': 0}
+                results.append([frame_idx, self.next_id, *d[:4], d[4]])
+                self.next_id += 1
+            return results
+
+        track_ids = list(self.tracks.keys())
+        track_boxes = [self.tracks[tid]['box'] for tid in track_ids]
+
+        if len(det_boxes) == 0:
+            # Incrementa o contador de perdidos para todas as pistas
+            to_delete = []
+            for tid in track_ids:
+                self.tracks[tid]['lost'] += 1
+                if self.tracks[tid]['lost'] > self.max_lost:
+                    to_delete.append(tid)
+            for tid in to_delete:
+                del self.tracks[tid]
+            return results
+
+        # Matriz de IoU entre pistas existentes e novas detecções
+        iou_matrix = np.zeros((len(track_ids), len(det_boxes)))
+        for i, t_box in enumerate(track_boxes):
+            for j, d_box in enumerate(det_boxes):
+                iou_matrix[i, j] = calcular_iou(t_box, d_box)
+
+        # Associação via Algoritmo Húngaro
+        row_ind, col_ind = linear_sum_assignment(-iou_matrix)
+
+        matched_tracks = set()
+        matched_dets = set()
+
+        for r, c in zip(row_ind, col_ind):
+            if iou_matrix[r, c] >= self.iou_threshold:
+                tid = track_ids[r]
+                d = detections[c]
+                
+                # Atualiza a pista
+                self.tracks[tid]['box'] = d[:4]
+                self.tracks[tid]['lost'] = 0
+                results.append([frame_idx, tid, *d[:4], d[4]])
+                
+                matched_tracks.add(r)
+                matched_dets.add(c)
+
+        # Trata pistas não associadas
+        to_delete = []
+        for i, tid in enumerate(track_ids):
+            if i not in matched_tracks:
+                self.tracks[tid]['lost'] += 1
+                if self.tracks[tid]['lost'] > self.max_lost:
+                    to_delete.append(tid)
+        for tid in to_delete:
+            del self.tracks[tid]
+
+        # Cria novas pistas para detecções não associadas
+        for j, d in enumerate(detections):
+            if j not in matched_dets:
+                self.tracks[self.next_id] = {'box': d[:4], 'lost': 0}
+                results.append([frame_idx, self.next_id, *d[:4], d[4]])
+                self.next_id += 1
+
+        return results
+
