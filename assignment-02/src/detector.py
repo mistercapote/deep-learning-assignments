@@ -55,8 +55,6 @@ def detectar_quadro_torchvision(model, image_path, frame_idx, min_conf=0.5, devi
             
     return deteccoes_frame
 
-import numpy as np
-
 def simular_detector(gt, p_drop=0.1, noise_std=2.0, fp_per_frame=0.5, img_size=128):
     """
     Simula um detector imperfeito corrompendo o Ground Truth (GT).
@@ -215,4 +213,116 @@ class NaiveIoUTracker:
                 results.append([frame_idx, self.next_id, *det[:4], det[4]])
                 self.next_id += 1
 
+        return results
+
+# Parte 2
+
+class RNNTracker:
+    def __init__(self, modelo_rnn, iou_threshold=0.3, max_lost=3, device='cpu'):
+        """
+        Rastreador Baseado em Memória Temporal (Parte 2 - Trilha A)
+        """
+        self.modelo = modelo_rnn
+        self.modelo.eval() # Garante que está em modo de inferência
+        self.iou_threshold = iou_threshold
+        self.max_lost = max_lost
+        self.device = device
+        
+        self.next_id = 1
+        # Estrutura: {track_id: {'box': [x,y,w,h], 'h': tensor_hidden, 'lost_count': int}}
+        self.active_tracks = {} 
+        
+    def update(self, frame_idx, detections):
+        results = []
+        det_boxes = [d[:4] for d in detections]
+        
+        # Se não há pistas ativas, inicializa todas as detecções como novas
+        if len(self.active_tracks) == 0:
+            for d in detections:
+                # O estado oculto 'h' começa a None (o PyTorch assume zeros)
+                self.active_tracks[self.next_id] = {'box': d[:4], 'h': None, 'lost_count': 0}
+                results.append([frame_idx, self.next_id, *d[:4], d[4]])
+                self.next_id += 1
+            return results
+            
+        track_ids = list(self.active_tracks.keys())
+        predicted_boxes = []
+        novos_h = []
+        
+        # 1. PREVISÃO: Rodar a RNN para prever a próxima posição de cada pista
+        with torch.no_grad():
+            for tid in track_ids:
+                track = self.active_tracks[tid]
+                # Prepara a entrada: (batch=1, seq_len=1, features=4)
+                x_input = torch.tensor(track['box'], dtype=torch.float32).view(1, 1, 4).to(self.device)
+                h_input = track['h']
+                
+                # Roda o modelo temporal
+                pred_box, h_new = self.modelo(x_input, h_input)
+                
+                predicted_boxes.append(pred_box.cpu().numpy().squeeze().tolist())
+                novos_h.append(h_new)
+        
+        # Se não há detecções no quadro atual, todas as pistas sofrem oclusão
+        if len(det_boxes) == 0:
+            tracks_to_remove = []
+            for i, tid in enumerate(track_ids):
+                self.active_tracks[tid]['box'] = predicted_boxes[i] # Roda para a frente!
+                self.active_tracks[tid]['h'] = novos_h[i]
+                self.active_tracks[tid]['lost_count'] += 1
+                
+                if self.active_tracks[tid]['lost_count'] > self.max_lost:
+                    tracks_to_remove.append(tid)
+                    
+            for tid in tracks_to_remove:
+                del self.active_tracks[tid]
+            return results
+
+        # 2. ASSOCIAÇÃO: Matriz de IoU usando as PREVISÕES (e não a posição antiga)
+        iou_matrix = np.zeros((len(track_ids), len(det_boxes)))
+        for i, p_box in enumerate(predicted_boxes):
+            for j, d_box in enumerate(det_boxes):
+                iou_matrix[i, j] = calcular_iou(p_box, d_box)
+                
+        # Matching via Algoritmo Húngaro
+        row_ind, col_ind = linear_sum_assignment(-iou_matrix)
+        matched_tracks = set()
+        matched_dets = set()
+        
+        for r, c in zip(row_ind, col_ind):
+            if iou_matrix[r, c] >= self.iou_threshold:
+                tid = track_ids[r]
+                det = detections[c]
+                
+                # SUCESSO: Atualiza a pista com a observação REAL (correção)
+                self.active_tracks[tid]['box'] = det[:4]
+                self.active_tracks[tid]['h'] = novos_h[r]
+                self.active_tracks[tid]['lost_count'] = 0
+                
+                results.append([frame_idx, tid, *det[:4], det[4]])
+                matched_tracks.add(r)
+                matched_dets.add(c)
+                
+        # 3. GESTÃO DE OCLUSÃO: Tracks não associadas "rodam para a frente"
+        tracks_to_remove = []
+        for i, tid in enumerate(track_ids):
+            if i not in matched_tracks:
+                # Usa a PREVISÃO da rede como a nova posição (fantasma)
+                self.active_tracks[tid]['box'] = predicted_boxes[i]
+                self.active_tracks[tid]['h'] = novos_h[i]
+                self.active_tracks[tid]['lost_count'] += 1
+                
+                if self.active_tracks[tid]['lost_count'] > self.max_lost:
+                    tracks_to_remove.append(tid)
+                    
+        for tid in tracks_to_remove:
+            del self.active_tracks[tid]
+            
+        # 4. NASCIMENTO: Novas detecções viram novas tracks
+        for j, det in enumerate(detections):
+            if j not in matched_dets:
+                self.active_tracks[self.next_id] = {'box': det[:4], 'h': None, 'lost_count': 0}
+                results.append([frame_idx, self.next_id, *det[:4], det[4]])
+                self.next_id += 1
+                
         return results
