@@ -3,141 +3,156 @@ from scipy.optimize import linear_sum_assignment
 
 
 
-def calcular_iou(box1, box2):
-    """
-    O formato de cada caixa é (x, y, w, h)
-    """
+def calcular_iou(b1, b2):
+    """Calcula IoU entre duas bboxes no formato [x, y, w, h]."""
+    x1 = max(b1[0], b2[0])
+    y1 = max(b1[1], b2[1])
+    x2 = min(b1[0] + b1[2], b2[0] + b2[2])
+    y2 = min(b1[1] + b1[3], b2[1] + b2[3])
 
-    xA, yA, wA, hA = box1
-    xB, yB, wB, hB = box2
+    inter_w = max(0.0, x2 - x1)
+    inter_h = max(0.0, y2 - y1)
+    inter_area = inter_w * inter_h
 
-    left = max(xA, xB)
-    top = max(yA, yB)
+    area1 = b1[2] * b1[3]
+    area2 = b2[2] * b2[3]
+    union_area = area1 + area2 - inter_area
 
-    right = min(xA + wA, xB + wB)
-    bottom = min(yA + hA, yB + hB)
-
-    largura_int = max(0.0, right - left)
-    altura_int = max(0.0, bottom - top)
-
-    area_inter = largura_int * altura_int
-
-    if area_inter == 0:
-        return 0.0
-
-    areabox1 = wA * hA
-    areabox2 = wB * hB
-
-    area_uniao = areabox1 + areabox2 - area_inter
-
-    return area_inter / area_uniao
+    return inter_area / union_area if union_area > 0 else 0.0
 
 # O idf1 mede a qualidade global da identificação (em %)
-def calcular_idf1 (gt_list, tr_list, iou_thre = 0.5):
-
-
-    if len(gt_list) ==0 or len(tr_list)==0:
+def calcular_idf1(gt, predicoes, iou_threshold=0.5):
+    """
+    Calcula o IDF1 com atribuição global 1-para-1 entre IDs de GT e Predições.
+    gt e predicoes: listas no formato [frame, id, x, y, w, h, ...]
+    """
+    if len(gt) == 0 or len(predicoes) == 0:
         return 0.0
 
-
-    gt_arr = np.array(gt_list)
-    tr_arr = np.array(tr_list)
+    gt_arr = np.array(gt)
+    pred_arr = np.array(predicoes)
 
     gt_ids = np.unique(gt_arr[:, 1]).astype(int)
-    tr_ids = np.unique(tr_arr[:, 1]).astype(int)
+    pred_ids = np.unique(pred_arr[:, 1]).astype(int)
 
-    num_gt_ids = len(gt_ids)
-    num_tr_ids = len(tr_ids)
+    gt_id_to_idx = {gid: i for i, gid in enumerate(gt_ids)}
+    pred_id_to_idx = {pid: j for j, pid in enumerate(pred_ids)}
 
-    gt_id_to_idx = {g_id: idx for idx, g_id in enumerate(gt_ids)}
-    tr_id_to_idx = {t_id: idx for idx, t_id in enumerate(tr_ids)}
-    #  matriz de acertos
-    cost_matrix = np.zeros((num_gt_ids, num_tr_ids), dtype= int)
+    # Matriz de afinidade temporal: contagem de correspondências com IoU >= threshold
+    cost_matrix = np.zeros((len(gt_ids), len(pred_ids)), dtype=int)
 
-    gt_dict = {(int(f), int(i)): box for f, i, *box in gt_arr[:, :6]}
-    tr_dict = {(int(f), int(i)): box for f, i, *box in tr_arr[:, :6]}
-
-    frames = np.unique(np.concatenate([gt_arr[:, 0], tr_arr[:, 0]])).astype(int)
-
+    # Agrupa bboxes por frame para comparar
+    frames = np.unique(gt_arr[:, 0]).astype(int)
     for f in frames:
-        gt_in_frame = [i for i in gt_ids if (f, i) in gt_dict]
-        tr_in_frame = [j for j in tr_ids if (f, j) in tr_dict]
+        gt_f = [d for d in gt if d[0] == f]
+        pr_f = [d for d in predicoes if d[0] == f]
 
-        for g_id in gt_in_frame:
-            box_gt = gt_dict[(f, g_id)]
-            i_idx = gt_id_to_idx[g_id]
-            
-            for t_id in tr_in_frame:
-                box_tr = tr_dict[(f, t_id)]
-                j_idx = tr_id_to_idx[t_id]
+        for g in gt_f:
+            g_idx = gt_id_to_idx[int(g[1])]
+            for p in pr_f:
+                p_idx = pred_id_to_idx[int(p[1])]
+                if calcular_iou(g[2:6], p[2:6]) >= iou_threshold:
+                    cost_matrix[g_idx, p_idx] += 1
 
-                if calcular_iou(box_gt, box_tr) >= iou_thre:
-                    cost_matrix[i_idx, j_idx] += 1
-
-    #  Algoritmo Húngaro para Associação Global 1-para-1 (Maximização)
+    # Atribuição global ótima maximizando os matches (minimizando -cost)
     row_ind, col_ind = linear_sum_assignment(-cost_matrix)
-
-    # Total de acertos globais (IDTP)
     idtp = cost_matrix[row_ind, col_ind].sum()
 
-    n_gt = len(gt_list)
-    n_tr = len(tr_list)
+    n_gt = len(gt)
+    n_pred = len(predicoes)
 
-    # Cálculo final do IDF1
-    idf1 = (2.0 * idtp) / (n_gt + n_tr) if (n_gt + n_tr) > 0 else 0.0
+    idfp = n_pred - idtp
+    idfn = n_gt - idtp
 
-    return idf1
+    denominador = 2 * idtp + idfp + idfn
+    return float(2 * idtp / denominador) if denominador > 0 else 0.0
 
 
 #  IDSW mede a frequência de erros de troca de identidade (em contagem absoluta).
-def calcular_idsw(gt_list, tr_list, iou_threshold=0.5):
+def calcular_idsw_e_fragmentacoes(gt, predicoes, iou_threshold=0.5):
     """
-    Calcula a quantidade de ID Switches (IDSW) na sequência.
-    
-    gt_list, tr_list: listas no formato [frame, id, x, y, w, h, ...]
+    Calcula ID Switches (IDSW) e Fragmentações (Frag) frame a frame.
+    - IDSW: Um objeto do GT troca de identificador predito associado.
+    - Frag: A trajetória do GT é interrompida (perde rastreio) e retomada posteriormente.
     """
-    if len(gt_list) == 0 or len(tr_list) == 0:
-        return 0
+    if len(gt) == 0 or len(predicoes) == 0:
+        return 0, 0
 
-    gt_arr = np.array(gt_list)
-    tr_arr = np.array(tr_list)
+    gt_frames = np.unique([d[0] for d in gt]).astype(int)
+    pr_frames = np.unique([d[0] for d in predicoes]).astype(int)
+    todos_frames = sorted(list(set(gt_frames).union(set(pr_frames))))
 
-    # Identifica todos os quadros presentes na sequência
-    frames = np.unique(np.concatenate([gt_arr[:, 0], tr_arr[:, 0]])).astype(int)
-    frames.sort()
+    # Estado de cada GT: último ID predito associado e último frame rastreado
+    ultimo_pred_id = {}
+    ultimo_frame_rastreado = {}
 
-    # Dicionário para guardar o último ID do rastreador associado a cada ID do GT
-    ultimo_tr_id_do_gt = {}
-    idsw_count = 0
+    idsw = 0
+    fragmentacoes = 0
 
-    for f in frames:
-        # Filtra caixas do frame atual
-        gt_frame = gt_arr[gt_arr[:, 0] == f]
-        tr_frame = tr_arr[tr_arr[:, 0] == f]
+    for f in todos_frames:
+        gt_f = [d for d in gt if d[0] == f]
+        pr_f = [d for d in predicoes if d[0] == f]
 
-        if len(gt_frame) == 0 or len(tr_frame) == 0:
-            continue
+        # Matching frame a frame para descobrir qual predição pegou qual GT neste instante
+        if len(gt_f) > 0 and len(pr_f) > 0:
+            iou_mat = np.zeros((len(gt_f), len(pr_f)))
+            for i, g in enumerate(gt_f):
+                for j, p in enumerate(pr_f):
+                    iou_mat[i, j] = calcular_iou(g[2:6], p[2:6])
 
-        # Matriz de IoU para o frame f
-        iou_matrix = np.zeros((len(gt_frame), len(tr_frame)))
-        for i, g_row in enumerate(gt_frame):
-            for j, t_row in enumerate(tr_frame):
-                iou_matrix[i, j] = calcular_iou(g_row[2:6], t_row[2:6])
+            r_ind, c_ind = linear_sum_assignment(-iou_mat)
+            matches_frame = {}
+            for r, c in zip(r_ind, c_ind):
+                if iou_mat[r, c] >= iou_threshold:
+                    matches_frame[int(gt_f[r][1])] = int(pr_f[c][1])
+        else:
+            matches_frame = {}
 
-        # Associação húngara no frame atual (maximizando IoU)
-        row_ind, col_ind = linear_sum_assignment(-iou_matrix)
+        # Avalia switches e fragmentações para cada objeto de GT presente no frame
+        for g in gt_f:
+            gid = int(g[1])
+            if gid in matches_frame:
+                curr_pid = matches_frame[gid]
 
-        for r, c in zip(row_ind, col_ind):
-            if iou_matrix[r, c] >= iou_threshold:
-                gt_id = int(gt_frame[r, 1])
-                tr_id = int(tr_frame[c, 1])
+                if gid in ultimo_pred_id:
+                    # 1. ID Switch: se trocou o ID predito associado
+                    if curr_pid != ultimo_pred_id[gid]:
+                        idsw += 1
+                    
+                    # 2. Fragmentação: se houve um salto de frames sem rastreamento
+                    if f > ultimo_frame_rastreado[gid] + 1:
+                        fragmentacoes += 1
 
-                # Verifica se o GT já foi visto antes e se o ID do rastreador mudou
-                if gt_id in ultimo_tr_id_do_gt:
-                    if ultimo_tr_id_do_gt[gt_id] != tr_id:
-                        idsw_count += 1
+                ultimo_pred_id[gid] = curr_pid
+                ultimo_frame_rastreado[gid] = f
 
-                # Atualiza o último ID associado ao GT
-                ultimo_tr_id_do_gt[gt_id] = tr_id
+    return idsw, fragmentacoes
 
-    return idsw_count
+
+def calcular_metricas_completas(gt, predicoes, iou_threshold=0.5):
+    """
+    Agrupa todas as métricas obrigatórias da Parte 1.3.
+    """
+    gt_arr = np.array(gt)
+    pr_arr = np.array(predicoes)
+
+    ids_true = len(np.unique(gt_arr[:, 1])) if len(gt_arr) > 0 else 0
+    ids_pred = len(np.unique(pr_arr[:, 1])) if len(pr_arr) > 0 else 0
+
+    idf1 = calcular_idf1(gt, predicoes, iou_threshold=iou_threshold)
+    idsw, frag = calcular_idsw_e_fragmentacoes(gt, predicoes, iou_threshold=iou_threshold)
+
+    # Análogo temporal do erro de contagem do PA1
+    erro_absoluto_contagem = abs(ids_pred - ids_true)
+    razao_sobrecontagem = (ids_pred / ids_true) if ids_true > 0 else 0.0
+
+    return {
+        'idf1': idf1,
+        'idsw': idsw,
+        'frag': frag,
+        'ids_true': ids_true,
+        'ids_pred': ids_pred,
+        'erro_contagem': erro_absoluto_contagem,
+        'razao_ids': razao_sobrecontagem,
+        'idsw_por_gt': (idsw / ids_true) if ids_true > 0 else 0.0
+    }

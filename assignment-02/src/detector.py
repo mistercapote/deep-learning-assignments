@@ -55,6 +55,71 @@ def detectar_quadro_torchvision(model, image_path, frame_idx, min_conf=0.5, devi
             
     return deteccoes_frame
 
+import numpy as np
+
+def simular_detector(gt, p_drop=0.1, noise_std=2.0, fp_per_frame=0.5, img_size=128):
+    """
+    Simula um detector imperfeito corrompendo o Ground Truth (GT).
+    
+    Parâmetros:
+    - gt: Lista de bounding boxes verdadeiras no formato [frame_id, obj_id, x, y, w, h]
+    - p_drop: Probabilidade (0 a 1) de uma detecção verdadeira ser descartada (falso negativo).
+    - noise_std: Desvio padrão do ruído gaussiano adicionado às coordenadas [x, y, w, h].
+    - fp_per_frame: Média de falsos positivos injetados por quadro.
+    - img_size: Tamanho do vídeo gerado (por padrão 128x128 segundo o enunciado) para limitar FPs.
+    
+    Retorna:
+    - deteccoes: Lista de detecções no formato [frame_id, obj_id, x, y, w, h, conf]
+    """
+    deteccoes = []
+    frames_ids = np.unique([d[0] for d in gt]).astype(int)
+    
+    # 1. Aplicar drop e ruído nas detecções verdadeiras
+    for bbox in gt:
+        # Descarta p% das caixas
+        if np.random.rand() < p_drop:
+            continue
+            
+        frame_id = bbox[0]
+        obj_id = -1 # Trocamos para -1 pois o rastreador ainda não sabe a identidade
+        
+        # Extrai coordenadas e adiciona ruído gaussiano
+        x, y, w, h = bbox[2:6]
+        x += np.random.normal(0, noise_std)
+        y += np.random.normal(0, noise_std)
+        w += np.random.normal(0, noise_std)
+        h += np.random.normal(0, noise_std)
+        
+        # Garante que largura e altura não fiquem negativas ou nulas após o ruído
+        w = max(1.0, w)
+        h = max(1.0, h)
+        
+        # Confiança alta simulada para verdadeiros positivos
+        conf = np.random.uniform(0.7, 1.0)
+        
+        deteccoes.append([frame_id, obj_id, x, y, w, h, conf])
+        
+    # 2. Injetar falsos positivos
+    for f in frames_ids:
+        # Usamos uma distribuição de Poisson para o número de falsos positivos no frame
+        num_fps = np.random.poisson(fp_per_frame)
+        
+        for _ in range(num_fps):
+            # Gera coordenadas aleatórias dentro dos limites da imagem (128x128)
+            x = np.random.uniform(0, img_size - 10)
+            y = np.random.uniform(0, img_size - 10)
+            w = np.random.uniform(5, 25)
+            h = np.random.uniform(5, 25)
+            
+            # Confiança geralmente menor para falsos positivos
+            conf = np.random.uniform(0.1, 0.5)
+            
+            deteccoes.append([f, -1, x, y, w, h, conf])
+            
+    # Ordena as detecções por frame para garantir o processamento sequencial correto
+    deteccoes.sort(key=lambda item: item[0])
+    
+    return deteccoes
 
 # Parte 1.2
 
