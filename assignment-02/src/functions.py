@@ -176,3 +176,40 @@ class IoUTracker:
 
         return results
 
+#  Parte 1
+
+def carregar_gt(caminho_gt_txt):
+    """
+    Carrega o Ground Truth de uma sequência MOT17 (ex: gt/gt.txt).
+    
+    Formato MOT17:
+    [frame, id, bb_left, bb_top, bb_width, bb_height, conf, class, visibility]
+    
+    Retorna: lista de [frame, id, x, y, w, h, conf] apenas para pedestres.
+    """
+    gt_list = []
+    
+    # Carrega os dados separados por vírgula
+    data = np.loadtxt(caminho_gt_txt, delimiter=',')
+    
+    # Se o arquivo estiver vazio
+    if len(data) == 0:
+        return gt_list
+
+    for row in data:
+        frame, obj_id, x, y, w, h, conf, classe, vis = row
+        
+        # Filtro padrão do MOT17 para avaliação:
+        # classe == 1 (pedestre) e conf == 1 (entrada válida para avaliação)
+        if int(classe) == 1 and int(conf) == 1:
+            gt_list.append([
+                int(frame), 
+                int(obj_id), 
+                float(x), 
+                float(y), 
+                float(w), 
+                float(h), 
+                float(conf)
+            ])
+            
+    return gt_list
