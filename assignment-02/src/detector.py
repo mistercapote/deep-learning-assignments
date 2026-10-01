@@ -1,0 +1,153 @@
+import numpy as np 
+import torch
+import torchvision
+from torchvision.transforms import functional as F
+from PIL import Image
+from scipy.optimize import linear_sum_assignment
+from .metrics import calcular_iou
+
+#  Part 1.1
+def carregar_deteccoes_mot17(caminho_det_txt, min_conf=0.0):
+    """
+    Carrega detecções públicas de uma sequência MOT17 (ex: det/det.txt).
+    
+    Format retorno: lista de [frame, -1, x, y, w, h, conf]
+    """
+    deteccoes = []
+    data = np.loadtxt(caminho_det_txt, delimiter=',')
+    
+    for row in data:
+        frame, _, x, y, w, h, conf = row[:7]
+        if conf >= min_conf:
+            deteccoes.append([int(frame), -1, float(x), float(y), float(w), float(h), float(conf)])
+            
+    return deteccoes
+
+def carregar_modelo_torchvision(device='cuda' if torch.cuda.is_available() else 'cpu'):
+    # Carrega modelo pré-treinado em COCO
+    weights = torchvision.models.detection.FasterRCNN_ResNet50_FPN_Weights.DEFAULT
+    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(weights=weights)
+    model.eval()
+    return model.to(device)
+
+def detectar_quadro_torchvision(model, image_path, frame_idx, min_conf=0.5, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    """
+    Roda inferência em um único quadro de imagem e extrai caixas da classe 'person' (label == 1).
+    """
+    img = Image.open(image_path).convert("RGB")
+    img_tensor = F.to_tensor(img).unsqueeze(0).to(device)
+    
+    with torch.no_grad():
+        predictions = model(img_tensor)[0]
+    
+    boxes = predictions['boxes'].cpu().numpy()
+    scores = predictions['scores'].cpu().numpy()
+    labels = predictions['labels'].cpu().numpy()
+    
+    deteccoes_frame = []
+    for box, score, label in zip(boxes, scores, labels):
+        # Filtra apenas a classe 'person' (label == 1) e confiança mínima
+        if label == 1 and score >= min_conf:
+            x1, y1, x2, y2 = box
+            w = x2 - x1
+            h = y2 - y1
+            deteccoes_frame.append([int(frame_idx), -1, float(x1), float(y1), float(w), float(h), float(score)])
+            
+    return deteccoes_frame
+
+
+# Parte 1.2
+
+class NaiveIoUTracker:
+    def __init__(self, iou_threshold=0.3, max_lost=3):
+        """
+        Rastreador de Baseline por IoU (Parte 1 - Item 2)
+        
+        Parameters:
+        -----------
+        iou_threshold : float
+            Limiar mínimo de IoU para aceitar uma associação.
+        max_lost : int (k)
+            Número máximo de quadros consecutivos sem observação até declarar morte da track.
+        """
+        self.iou_threshold = iou_threshold
+        self.max_lost = max_lost
+        self.next_id = 1
+        self.active_tracks = {}  # {track_id: {'box': [x, y, w, h], 'lost_count': int}}
+
+    def update(self, frame_idx, detections):
+        """
+        Processa as detecções do quadro atual (frame_idx).
+        
+        detections: lista/array de caixas no formato [x, y, w, h, conf]
+        Retorna: lista de predições no formato MOT [frame_idx, track_id, x, y, w, h, conf]
+        """
+        results = []
+        det_boxes = [d[:4] for d in detections]
+        
+        # 1. Se não há pistas ativas, todas as detecções viram novas pistas
+        if len(self.active_tracks) == 0:
+            for d in detections:
+                self.active_tracks[self.next_id] = {'box': d[:4], 'lost_count': 0}
+                results.append([frame_idx, self.next_id, *d[:4], d[4]])
+                self.next_id += 1
+            return results
+
+        track_ids = list(self.active_tracks.keys())
+        track_boxes = [self.active_tracks[tid]['box'] for tid in track_ids]
+
+        # 2. Se não vieram detecções no quadro t, incrementa contadores de perda
+        if len(det_boxes) == 0:
+            tracks_to_remove = []
+            for tid in track_ids:
+                self.active_tracks[tid]['lost_count'] += 1
+                if self.active_tracks[tid]['lost_count'] > self.max_lost:
+                    tracks_to_remove.append(tid)
+            for tid in tracks_to_remove:
+                del self.active_tracks[tid]
+            return results
+
+        # 3. Monta a Matriz de Custos/IoU entre Tracks (t-1) e Detecções (t)
+        iou_matrix = np.zeros((len(track_ids), len(det_boxes)))
+        for i, t_box in enumerate(track_boxes):
+            for j, d_box in enumerate(det_boxes):
+                iou_matrix[i, j] = calcular_iou(t_box, d_box)
+
+        # 4. Matching via Algoritmo Húngaro (maximizando IoU)
+        row_ind, col_ind = linear_sum_assignment(-iou_matrix)
+
+        matched_tracks = set()
+        matched_dets = set()
+
+        for r, c in zip(row_ind, col_ind):
+            # Filtra pelo limiar fixo
+            if iou_matrix[r, c] >= self.iou_threshold:
+                tid = track_ids[r]
+                det = detections[c]
+                
+                # Atualiza estado da pista associada
+                self.active_tracks[tid]['box'] = det[:4]
+                self.active_tracks[tid]['lost_count'] = 0
+                results.append([frame_idx, tid, *det[:4], det[4]])
+                
+                matched_tracks.add(r)
+                matched_dets.add(c)
+
+        # 5. Gestão de Morte (Tracks sem observação no quadro atual)
+        tracks_to_remove = []
+        for i, tid in enumerate(track_ids):
+            if i not in matched_tracks:
+                self.active_tracks[tid]['lost_count'] += 1
+                if self.active_tracks[tid]['lost_count'] > self.max_lost:
+                    tracks_to_remove.append(tid)
+        for tid in tracks_to_remove:
+            del self.active_tracks[tid]
+
+        # 6. Gestão de Nascimento (Detecções não associadas ganham novo ID)
+        for j, det in enumerate(detections):
+            if j not in matched_dets:
+                self.active_tracks[self.next_id] = {'box': det[:4], 'lost_count': 0}
+                results.append([frame_idx, self.next_id, *det[:4], det[4]])
+                self.next_id += 1
+
+        return results
