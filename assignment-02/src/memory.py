@@ -53,8 +53,15 @@ def analisar_gradiente_horizonte(modelo, seq_len=20, device='cpu'):
     for t in range(seq_len):
         x_t = x_seq[:, t:t+1, :]
         pred, h = modelo(x_t, h)
-        h.retain_grad()
-        h_states.append(h)
+        
+        # ---> CORREÇÃO: Identificar se é tupla (LSTM) ou tensor (RNN/GRU)
+        if isinstance(h, tuple):
+            h_target = h[0] # Pegamos apenas o hidden state real (ignoramos o cell state c_n)
+        else:
+            h_target = h
+            
+        h_target.retain_grad()
+        h_states.append(h_target)
         
     # Finge uma loss qualquer no último instante T
     loss = pred.sum()

@@ -23,14 +23,14 @@ def carregar_deteccoes_mot17(caminho_det_txt, min_conf=0.0):
             
     return deteccoes
 
-def carregar_modelo_torchvision(device= torch.device('cuda' if torch.cuda.is_available() else 'xpu' if hasattr(torch, 'xpu') and torch.xpu.is_available() else 'cpu')):
+def carregar_modelo_torchvision(device='cpu'):
     # Carrega modelo pré-treinado em COCO
     weights = torchvision.models.detection.FasterRCNN_ResNet50_FPN_Weights.DEFAULT
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn(weights=weights)
     model.eval()
     return model.to(device)
 
-def detectar_quadro_torchvision(model, image_path, frame_idx, min_conf=0.5, device= torch.device('cuda' if torch.cuda.is_available() else 'xpu' if hasattr(torch, 'xpu') and torch.xpu.is_available() else 'cpu')):
+def detectar_quadro_torchvision(model, image_path, frame_idx, min_conf=0.5, device='cpu'):
     """
     Roda inferência em um único quadro de imagem e extrai caixas da classe 'person' (label == 1).
     """
@@ -217,6 +217,10 @@ class NaiveIoUTracker:
 
 # Parte 2
 
+import torch
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+
 class RNNTracker:
     def __init__(self, modelo_rnn, iou_threshold=0.3, max_lost=3, device='cpu'):
         """
@@ -255,13 +259,25 @@ class RNNTracker:
                 track = self.active_tracks[tid]
                 # Prepara a entrada: (batch=1, seq_len=1, features=4)
                 x_input = torch.tensor(track['box'], dtype=torch.float32).view(1, 1, 4).to(self.device)
+                x_input = torch.tensor(track['box'], dtype=torch.float32).view(1, 1, 4).to(self.device)
                 h_input = track['h']
                 
                 # Roda o modelo temporal
                 pred_box, h_new = self.modelo(x_input, h_input)
                 
                 predicted_boxes.append(pred_box.cpu().numpy().squeeze().tolist())
-                novos_h.append(h_new)
+                
+                # ---> CORREÇÃO AQUI: Lidando com LSTM (Tupla) e RNN/GRU (Tensor) <---
+                # O detach() desvincula o hidden state do grafo computacional anterior,
+                # o que é obrigatório para não estourar a memória durante o rastreamento em sequência.
+                if isinstance(h_new, tuple):
+                    # Se for LSTM, dá detach no hidden state e cell state separadamente
+                    h_detached = tuple(h.detach() for h in h_new)
+                else:
+                    # Se for RNN ou GRU, dá detach direto
+                    h_detached = h_new.detach()
+                    
+                novos_h.append(h_detached)
         
         # Se não há detecções no quadro atual, todas as pistas sofrem oclusão
         if len(det_boxes) == 0:

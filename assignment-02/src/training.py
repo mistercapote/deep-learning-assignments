@@ -7,10 +7,10 @@ import numpy as np
 
 def treinar_modelo_temporal(modelo, gt_completo, seq_len=10, batch_size=32, epochs=15, lr=1e-3):
     """
-    modelo: Instância da nossa MovimentoRNN.
+    modelo: Instância da nossa MovimentoRNN (ou MovimentoAblacao).
     gt_completo: Lista com o Ground Truth de TODAS as sequências de treino agregadas.
     """
-    device =  torch.device('cuda' if torch.cuda.is_available() else 'xpu' if hasattr(torch, 'xpu') and torch.xpu.is_available() else 'cpu')
+    device = 'cpu'
     modelo.to(device)
     modelo.train()
     
@@ -42,6 +42,12 @@ def treinar_modelo_temporal(modelo, gt_completo, seq_len=10, batch_size=32, epoc
             
             # Backward
             loss.backward()
+            
+            # ---> CORREÇÃO AQUI: Gradient Clipping <---
+            # Evita a explosão de gradientes (comum em RNNs padrão) 
+            # limitando a norma máxima dos gradientes a 1.0 antes do passo do otimizador.
+            torch.nn.utils.clip_grad_norm_(modelo.parameters(), max_norm=1.0)
+            
             optimizer.step()
             
             epoch_loss += loss.item()
