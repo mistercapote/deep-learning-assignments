@@ -23,14 +23,14 @@ def carregar_deteccoes_mot17(caminho_det_txt, min_conf=0.0):
             
     return deteccoes
 
-def carregar_modelo_torchvision(device='cuda' if torch.cuda.is_available() else 'cpu'):
+def carregar_modelo_torchvision(device= torch.device('cuda' if torch.cuda.is_available() else 'xpu' if hasattr(torch, 'xpu') and torch.xpu.is_available() else 'cpu')):
     # Carrega modelo pré-treinado em COCO
     weights = torchvision.models.detection.FasterRCNN_ResNet50_FPN_Weights.DEFAULT
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn(weights=weights)
     model.eval()
     return model.to(device)
 
-def detectar_quadro_torchvision(model, image_path, frame_idx, min_conf=0.5, device='cuda' if torch.cuda.is_available() else 'cpu'):
+def detectar_quadro_torchvision(model, image_path, frame_idx, min_conf=0.5, device= torch.device('cuda' if torch.cuda.is_available() else 'xpu' if hasattr(torch, 'xpu') and torch.xpu.is_available() else 'cpu')):
     """
     Roda inferência em um único quadro de imagem e extrai caixas da classe 'person' (label == 1).
     """

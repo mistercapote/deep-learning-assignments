@@ -3,14 +3,14 @@ import torch.optim as optim
 import torch
 from .dataset import TrajetoriasMOTDataset
 from torch.utils.data import Dataset, DataLoader
-
+import numpy as np
 
 def treinar_modelo_temporal(modelo, gt_completo, seq_len=10, batch_size=32, epochs=15, lr=1e-3):
     """
     modelo: Instância da nossa MovimentoRNN.
     gt_completo: Lista com o Ground Truth de TODAS as sequências de treino agregadas.
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device =  torch.device('cuda' if torch.cuda.is_available() else 'xpu' if hasattr(torch, 'xpu') and torch.xpu.is_available() else 'cpu')
     modelo.to(device)
     modelo.train()
     

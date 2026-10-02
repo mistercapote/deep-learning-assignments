@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-
+import matplotlib.pyplot as plt
 
 
 def calcular_iou(b1, b2):
@@ -156,3 +156,63 @@ def calcular_metricas_completas(gt, predicoes, iou_threshold=0.5):
         'razao_ids': razao_sobrecontagem,
         'idsw_por_gt': (idsw / ids_true) if ids_true > 0 else 0.0
     }
+
+
+def analisar_sobrevivencia_oclusao(gt, predicoes):
+    """
+    Analisa os buracos (gaps/oclusões) no Ground Truth e verifica se o
+    ID previsto sobreviveu a oclusão. (Parte 4.2)
+    """
+    gt_arr = np.array(gt)
+    pr_arr = np.array(predicoes)
+    
+    if len(gt_arr) == 0 or len(pr_arr) == 0:
+        return
+        
+    gt_ids = np.unique(gt_arr[:, 1]).astype(int)
+    
+    duracao_oclusoes = []
+    sobrevivencias = []
+    
+    # Dicionário rápido para achar predições: {(frame, gt_id): pred_id}
+    # (Para simplificar, vamos assumir que fizemos um match de IoU rápido aqui)
+    # Recomendado usar sua função de matches_frame da métrica original.
+    
+    for gid in gt_ids:
+        # Pega os frames onde este ID verdadeiro aparece
+        frames_gt = sorted(gt_arr[gt_arr[:, 1] == gid][:, 0].astype(int))
+        
+        # Procura por saltos/buracos nos frames (oclusão)
+        for i in range(1, len(frames_gt)):
+            f_prev = frames_gt[i-1]
+            f_curr = frames_gt[i]
+            gap = f_curr - f_prev - 1
+            
+            if gap > 0:
+                # É uma oclusão!
+                duracao_oclusoes.append(gap)
+                
+                # Pegar o pr_id no frame_prev e frame_curr (lógica simplificada assumindo match exato de bounding box, na prática use IoU > 0.5)
+                box_prev = gt_arr[(gt_arr[:, 0] == f_prev) & (gt_arr[:, 1] == gid)][0][2:6]
+                box_curr = gt_arr[(gt_arr[:, 0] == f_curr) & (gt_arr[:, 1] == gid)][0][2:6]
+                
+                pr_prev = [p for p in predicoes if p[0] == f_prev and calcular_iou(p[2:6], box_prev) > 0.3]
+                pr_curr = [p for p in predicoes if p[0] == f_curr and calcular_iou(p[2:6], box_curr) > 0.3]
+                
+                if len(pr_prev) > 0 and len(pr_curr) > 0:
+                    id_antes = pr_prev[0][1]
+                    id_depois = pr_curr[0][1]
+                    sobrevivencias.append(1 if id_antes == id_depois else 0)
+                else:
+                    sobrevivencias.append(0) # Perdeu o rastro
+                    
+    # Plotar o histograma de oclusões x taxa de sobrevivência
+    if len(duracao_oclusoes) > 0:
+        plt.figure(figsize=(8, 4))
+        plt.scatter(duracao_oclusoes, sobrevivencias, alpha=0.5)
+        plt.xlabel("Duração da Oclusão (Quadros)")
+        plt.ylabel("Sobreviveu (1=Sim, 0=Não)")
+        plt.title("Horizonte Empírico de Memória")
+        plt.show()
+    else:
+        print("Nenhuma oclusão encontrada no Ground Truth fornecido.")

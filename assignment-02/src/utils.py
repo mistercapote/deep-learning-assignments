@@ -78,3 +78,44 @@ def plotar_descolamento(resultados_sequencias):
     
     plt.tight_layout()
     plt.show()
+
+
+import cv2
+import matplotlib.pyplot as plt
+
+def plotar_tira_de_quadros(video_frames, gt, predicoes, quadros_alvo):
+    """
+    Plota uma tira de quadros mostrando GT (verde) e Predição (vermelho)
+    quadros_alvo: lista de inteiros com os frames que deseja visualizar (ex: buraco de oclusão)
+    """
+    num_quadros = len(quadros_alvo)
+    fig, axes = plt.subplots(1, num_quadros, figsize=(4 * num_quadros, 4))
+    if num_quadros == 1:
+        axes = [axes]
+        
+    for idx, f in enumerate(quadros_alvo):
+        # Pega a imagem original (f-1 pois o index é 0-based e o frame é 1-based)
+        img = video_frames[f-1].copy()
+        
+        # Filtra GT e Preds para o frame específico
+        gt_f = [d for d in gt if int(d[0]) == f]
+        pr_f = [d for d in predicoes if int(d[0]) == f]
+        
+        # Desenha GT em Verde
+        for g in gt_f:
+            obj_id, x, y, w, h = int(g[1]), int(g[2]), int(g[3]), int(g[4]), int(g[5])
+            cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(img, f"GT:{obj_id}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+            
+        # Desenha Predição em Vermelho
+        for p in pr_f:
+            obj_id, x, y, w, h = int(p[1]), int(p[2]), int(p[3]), int(p[4]), int(p[5])
+            cv2.rectangle(img, (x, y), (x+w, y+h), (255, 0, 0), 2)
+            cv2.putText(img, f"PR:{obj_id}", (x, y+h+15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,0,0), 1)
+            
+        axes[idx].imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        axes[idx].set_title(f"Quadro {f}")
+        axes[idx].axis('off')
+        
+    plt.tight_layout()
+    plt.show()
