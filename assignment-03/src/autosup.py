@@ -5,6 +5,7 @@ Tudo o que e logica fica aqui; o notebook so orquestra e mostra resultados.
 """
 import os
 import random
+import time
 
 import albumentations as A
 import cv2
@@ -46,12 +47,12 @@ def listar_ids(raiz: str) -> list:
 # ----------------------------------------------------------------------------
 # Aumentacao e dataset do SimCLR
 # ----------------------------------------------------------------------------
-def criar_augment_simclr(scale=(0.2, 1.0), ratio=(0.75, 1.3333)) -> A.Compose:
+def criar_augment_simclr(scale=(0.2, 1.0), ratio=(0.75, 1.3333), lado=224) -> A.Compose:
     """Aumentacao do SimCLR. O parametro `scale` do RandomResizedCrop e a variavel do
     experimento obrigatorio de aumentacao: com animal em ~2% do quadro, um crop de
     20% da imagem frequentemente nao contem o animal."""
     return A.Compose([
-        A.RandomResizedCrop(size=(224, 224), scale=scale, ratio=ratio),
+        A.RandomResizedCrop(size=(lado, lado), scale=scale, ratio=ratio),
         A.HorizontalFlip(p=0.5),
         A.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1, p=0.8),
         A.ToGray(p=0.2),
@@ -116,15 +117,76 @@ def nt_xent(z1: torch.Tensor, z2: torch.Tensor, temperatura: float = 0.5) -> tor
     return F.cross_entropy(sim, alvo)
 
 
+def _sync(device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    elif device.type == "xpu":
+        torch.xpu.synchronize()
+
+
+def _passo_simclr(modelo, opt, v1, v2, temperatura, amp, device):
+    """Um passo de treino. As duas views vao juntas num unico forward (SimCLR original)."""
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp):
+        z = modelo(torch.cat([v1, v2], dim=0))
+    z1, z2 = z.chunk(2)
+    loss = nt_xent(z1, z2, temperatura)
+    opt.zero_grad()
+    loss.backward()
+    opt.step()
+    return loss
+
+
+def _loader_simclr(raiz_train, augment, batch_size, num_workers, max_imgs, seed):
+    ids = listar_ids(raiz_train)
+    if max_imgs is not None and max_imgs < len(ids):
+        ids = sorted(random.Random(seed).sample(ids, max_imgs))
+    return DataLoader(DatasetSimCLR(raiz_train, ids, augment), batch_size=batch_size, shuffle=True,
+                      drop_last=True, num_workers=num_workers, persistent_workers=num_workers > 0)
+
+
+def perfilar_pretreino(raiz_train, augment, device, batch_size=128, num_workers=4, n_batches=6, amp=False):
+    """Mede onde o tempo vai, em segundos por batch: (1) so o DataLoader (leitura + aumentacao na CPU);
+    (2) so o passo de treino, com dados sinteticos (GPU). Imprime tambem a estimativa por epoca."""
+    loader = _loader_simclr(raiz_train, augment, batch_size, num_workers, None, 0)
+    t0 = time.time()
+    it = iter(loader)
+    next(it)
+    t_subida = time.time() - t0
+    t0 = time.time()
+    for _ in range(n_batches):
+        next(it)
+    t_dados = (time.time() - t0) / n_batches
+
+    modelo = SimCLR(criar_encoder("aleatorio")).to(device).train()   # pesos nao mudam o tempo
+    opt = torch.optim.AdamW(modelo.parameters(), lr=3e-4)
+    lado = augment(image=np.zeros((256, 256, 3), np.uint8))["image"].shape[-1]
+    v1 = torch.randn(batch_size, 3, lado, lado, device=device)
+    v2 = torch.randn(batch_size, 3, lado, lado, device=device)
+    _passo_simclr(modelo, opt, v1, v2, 0.5, amp, device)           # aquecimento
+    _sync(device)
+    t0 = time.time()
+    for _ in range(n_batches):
+        _passo_simclr(modelo, opt, v1, v2, 0.5, amp, device)
+    _sync(device)
+    t_gpu = (time.time() - t0) / n_batches
+
+    n_steps = len(loader)
+    print(f"subida dos workers : {t_subida:6.1f} s (uma vez)")
+    print(f"dados (CPU)        : {t_dados:6.2f} s/batch")
+    print(f"passo (GPU, amp={amp}): {t_gpu:6.2f} s/batch")
+    print(f"por epoca ({n_steps} batches): ~{n_steps * max(t_dados, t_gpu) / 60:.1f} min "
+          f"-> gargalo: {'DADOS (CPU)' if t_dados > t_gpu else 'GPU'}")
+    return {"dados": t_dados, "gpu": t_gpu}
+
+
 def pretreino_simclr(encoder, raiz_train, augment, device, label,
                      epocas=5, batch_size=128, lr=3e-4, temperatura=0.5,
-                     num_workers=4, seed=0):
-    """Continua o pre-treino do encoder com SimCLR sobre todo o train (sem rotulos).
+                     num_workers=4, seed=0, amp=False, max_imgs=None):
+    """Continua o pre-treino do encoder com SimCLR sobre o train (sem rotulos).
+    amp: bfloat16 no forward (mais rapido em GPU recente). max_imgs: usa so um subconjunto sorteado do train.
     Salva o encoder em models/simclr_{label}.pt e devolve o historico da loss."""
     fixar_seed(seed)
-    ids = listar_ids(raiz_train)
-    loader = DataLoader(DatasetSimCLR(raiz_train, ids, augment), batch_size=batch_size, shuffle=True,
-                        drop_last=True, num_workers=num_workers, persistent_workers=num_workers > 0)
+    loader = _loader_simclr(raiz_train, augment, batch_size, num_workers, max_imgs, seed)
     modelo = SimCLR(encoder).to(device)
     opt = torch.optim.AdamW(modelo.parameters(), lr=lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epocas)
@@ -132,17 +194,13 @@ def pretreino_simclr(encoder, raiz_train, augment, device, label,
 
     for ep in range(epocas):
         modelo.train()
-        acc = 0.0
+        t0, acc = time.time(), 0.0
         for v1, v2 in loader:
             v1, v2 = v1.to(device, non_blocking=True), v2.to(device, non_blocking=True)
-            loss = nt_xent(modelo(v1), modelo(v2), temperatura)
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            acc += loss.item() * v1.size(0)
+            acc += _passo_simclr(modelo, opt, v1, v2, temperatura, amp, device).item() * v1.size(0)
         sched.step()
         historico["loss"].append(acc / (len(loader) * batch_size))
-        print(f"[{label}] Epoch {ep + 1}/{epocas} | NT-Xent: {historico['loss'][-1]:.4f}")
+        print(f"[{label}] Epoch {ep + 1}/{epocas} | NT-Xent: {historico['loss'][-1]:.4f} | {time.time() - t0:.0f}s")
 
     os.makedirs("models", exist_ok=True)
     torch.save(encoder.state_dict(), f"models/simclr_{label}.pt")
