@@ -220,7 +220,7 @@ def extrair_features(encoder, loader, device):
     return np.concatenate(X), np.concatenate(y)
 
 
-def avaliacao_linear(encoder, loader_train, loader_val, loader_test, device, Cs=(0.01, 0.1, 1, 10, 100)):
+def avaliacao_linear(encoder, loader_train, loader_val, loader_test, device, Cs=(0.01, 0.1, 1, 10, 100, 1000)):
     """Congela o encoder, treina regressao logistica nos 105 rotulos e escolhe C no VAL (F1 macro).
     Os loaders devem usar transform_val (sem aumentacao) e shuffle=False."""
     Xtr, ytr = extrair_features(encoder, loader_train, device)

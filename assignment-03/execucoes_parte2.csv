@@ -1,0 +1,11 @@
+metodo,orcamento,seed,n_rotulos,f1_val,checkpoint
+piso (b),1,42,21,0.23488619799396745,models/best_model_p2_piso_orc1_seed42.pt
+SimCLR (Trilha A),1,42,21,0.16520751170463685,models/best_model_p2_simclr_orc1_seed42.pt
+piso (b),5,42,105,0.3926995594021535,models/best_model_p2_piso_orc5_seed42.pt
+SimCLR (Trilha A),5,42,105,0.3872369310122901,models/best_model_p2_simclr_orc5_seed42.pt
+piso (b),5,7,105,0.3832336128654796,models/best_model_p2_piso_orc5_seed7.pt
+SimCLR (Trilha A),5,7,105,0.4297823534611155,models/best_model_p2_simclr_orc5_seed7.pt
+piso (b),5,99,105,0.38254235629639705,models/best_model_p2_piso_orc5_seed99.pt
+SimCLR (Trilha A),5,99,105,0.36583612188481135,models/best_model_p2_simclr_orc5_seed99.pt
+piso (b),20,42,420,0.6118705450406009,models/best_model_p2_piso_orc20_seed42.pt
+SimCLR (Trilha A),20,42,420,0.5875187957820757,models/best_model_p2_simclr_orc20_seed42.pt

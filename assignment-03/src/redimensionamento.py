@@ -34,6 +34,7 @@ class DatasetTrap(Dataset):
         return imagem_transformada['image'], rotulo
 
 def train_epoch(model,device,criterio,   train_loader, val_loader, label, epochs=10, lr=1e-4):
+    os.makedirs('models', exist_ok=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=1)
     history = {'train_loss': [], 'val_loss': [], 'f1_score': []}
@@ -188,7 +189,7 @@ def eval_model(modelo, loader, criterio, device):
                     loss = criterio(logits, rotulos_lote)
                     accumulated_loss_test += loss.detach()* images.size(0)
                 test_loss = accumulated_loss_test.item()/ len(loader.dataset)
-                f1_score_here  = f1_score(previsoes, rotulos,average='macro')
+                f1_score_here  = f1_score(rotulos, previsoes, average='macro')
 
          
         

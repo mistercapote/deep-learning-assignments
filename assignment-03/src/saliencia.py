@@ -12,6 +12,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from scipy import ndimage
 from torchvision.models import resnet18
 
 from src.autosup import contar_parametros, desnormalizar
@@ -155,7 +156,12 @@ def metricas_mapa(mapa: np.ndarray, retang) -> dict:
     m = mapa[y0:y1, x0:x1]
     acum = np.cumsum(np.sort(m.ravel())[::-1]) / (m.sum() + 1e-12)
     iy, ix = np.unravel_index(m.argmax(), m.shape)
-    return {"area_50": float((np.searchsorted(acum, 0.5) + 1) / m.size), "pico": (int(ix + x0), int(iy + y0))}
+    # bbox50: largura x altura (px de 224) da mancha >= 50% do pico que contem o pico
+    comp, _ = ndimage.label(m >= 0.5 * m.max())
+    ys, xs = np.where(comp == comp[iy, ix])
+    bbox = (int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1))
+    return {"area_50": float((np.searchsorted(acum, 0.5) + 1) / m.size), "pico": (int(ix + x0), int(iy + y0)),
+            "bbox50": bbox}
 
 
 # ----------------------------------------------------------------------------
@@ -208,8 +214,8 @@ def galeria(ids, y, modelo, raiz, device, classes, transform, titulo="",
             "p_verdadeira": float(p[verd]), "croma_medio": croma_medio(img),
             "tam_original": f"{img.shape[1]}x{img.shape[0]}",
             "escala_p/224": LADO / max(img.shape[:2]),
-            "gradcam_area50": m_cam["area_50"], "gradcam_pico": m_cam["pico"],
-            "oclusao_area50": m_ocl["area_50"], "oclusao_pico": m_ocl["pico"],
+            "gradcam_area50": m_cam["area_50"], "gradcam_pico": m_cam["pico"], "gradcam_bbox50": m_cam["bbox50"],
+            "oclusao_area50": m_ocl["area_50"], "oclusao_pico": m_ocl["pico"], "oclusao_bbox50": m_ocl["bbox50"],
             "oclusao_queda_max": float(ocl_bruto.max()),
         })
     if titulo:
